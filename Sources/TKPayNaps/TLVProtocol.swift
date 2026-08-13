@@ -54,6 +54,11 @@ public enum TLVProtocol {
         public static let paymentResponse = "101"
         public static let confirmationRequest = "002"
         public static let confirmationResponse = "102"
+        public static let cancellationRequest = "003"
+        public static let cancellationResponse = "103"
+        public static let cancellationCorrection = "104"
+        public static let settlementRequest = "010"
+        public static let settlementResponse = "110"
     }
 
     /// Receipt Sub-tags (within DP/010)
@@ -109,6 +114,39 @@ public enum TLVProtocol {
             + buildField(tag: Tags.NS, value: sequence)
             + buildField(tag: Tags.DATR, value: dateTime.date)
             + buildField(tag: Tags.HETR, value: dateTime.time)
+    }
+
+    /// Build cancellation request TLV (TM=003)
+    ///
+    /// NapsPay v5.4.4+ requires the original amount (TAG 002) in the frame.
+    /// Pass `amountCentimes` when targeting v5.4.4+.
+    public static func buildCancellationRequest(
+        stan: String,
+        ncai: String,
+        sequence: String,
+        amountCentimes: Int? = nil
+    ) -> String {
+        let dateTime = getCurrentDateTime()
+        var msg = buildField(tag: Tags.TM, value: MessageTypes.cancellationRequest)
+        if let amount = amountCentimes {
+            msg += buildField(tag: Tags.MT, value: String(amount))
+        }
+        msg += buildField(tag: Tags.STAN, value: stan)
+            + buildField(tag: Tags.NCAI, value: ncai)
+            + buildField(tag: Tags.NSA, value: sequence)
+            + buildField(tag: Tags.DA, value: dateTime.date)
+            + buildField(tag: Tags.HE, value: dateTime.time)
+        return msg
+    }
+
+    /// Build settlement request TLV (TM=010 — telecollecte)
+    public static func buildSettlementRequest(ncai: String) -> String {
+        let dateTime = getCurrentDateTime()
+
+        return buildField(tag: Tags.TM, value: MessageTypes.settlementRequest)
+            + buildField(tag: Tags.NCAI, value: ncai)
+            + buildField(tag: Tags.DA, value: dateTime.date)
+            + buildField(tag: Tags.HE, value: dateTime.time)
     }
 
     // MARK: - Parsing TLV

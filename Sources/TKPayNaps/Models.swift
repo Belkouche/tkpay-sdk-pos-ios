@@ -170,6 +170,36 @@ public struct Receipt {
     }
 }
 
+// MARK: - Settlement Result
+
+/// Settlement result for TM=010 (telecollecte)
+public struct SettlementResult {
+    /// Whether settlement was accepted by NAPS server
+    public let success: Bool
+    /// Response code (000 = success)
+    public let responseCode: String
+    /// Settlement date (DDMMYYYY)
+    public let date: String?
+    /// Settlement time (HHMMSS)
+    public let time: String?
+    /// Error message if settlement failed
+    public let error: String?
+}
+
+// MARK: - Cancellation Result
+
+/// Cancellation result for TM=003 (void)
+public struct CancellationResult {
+    /// Whether cancellation was accepted (MT=103 or 104, RC=000)
+    public let success: Bool
+    /// Response code (000 = success)
+    public let responseCode: String
+    /// STAN echoed by the terminal
+    public let stan: String?
+    /// Error message if cancellation failed
+    public let error: String?
+}
+
 // MARK: - Errors
 
 /// Error codes

@@ -114,6 +114,89 @@ public class NapsPayClient {
         }
     }
 
+    /// Force end-of-day settlement (telecollecte) — TM=010
+    ///
+    /// Sends batch totals to the NAPS server. The terminal must be idle
+    /// ("Attente Caisse") and referencing must have run at least once.
+    ///
+    /// - Parameters:
+    ///   - registerId: Register ID (2 digits, e.g., "01")
+    ///   - cashierId: Cashier ID (5 digits, e.g., "00001")
+    /// - Returns: SettlementResult with response code
+    public func settlement(registerId: String, cashierId: String) async -> SettlementResult {
+        let ncai = registerId + cashierId
+        let tlvRequest = TLVProtocol.buildSettlementRequest(ncai: ncai)
+        let connection = NapsConnection(config: config)
+
+        do {
+            try await connection.connect()
+            let response = try await connection.sendAndReceive(tlvRequest, timeout: config.timeout)
+            connection.disconnect()
+
+            let fields = TLVProtocol.parse(response)
+            let responseCode = fields[TLVProtocol.Tags.CR] ?? ""
+
+            return SettlementResult(
+                success: responseCode == "000",
+                responseCode: responseCode,
+                date: fields[TLVProtocol.Tags.DA],
+                time: fields[TLVProtocol.Tags.HE],
+                error: responseCode != "000" ? "Settlement failed with code: \(responseCode)" : nil
+            )
+        } catch {
+            connection.disconnect()
+            return SettlementResult(success: false, responseCode: "", date: nil, time: nil, error: error.localizedDescription)
+        }
+    }
+
+    /// Cancel (void) a previous transaction (TM=003)
+    ///
+    /// NapsPay v5.4.4+ requires the original amount and may respond with
+    /// MT=104 (correction) in addition to MT=103. Both are treated as success.
+    ///
+    /// - Parameters:
+    ///   - stan: STAN of the transaction to cancel
+    ///   - registerId: Register ID (2 digits)
+    ///   - cashierId: Cashier ID (5 digits)
+    ///   - sequence: Sequence number of the original transaction
+    ///   - amountCentimes: Original amount in centimes (required for v5.4.4+)
+    public func cancelPayment(
+        stan: String,
+        registerId: String,
+        cashierId: String,
+        sequence: String,
+        amountCentimes: Int? = nil
+    ) async -> CancellationResult {
+        let ncai = registerId + cashierId
+        let tlvRequest = TLVProtocol.buildCancellationRequest(
+            stan: stan, ncai: ncai, sequence: sequence, amountCentimes: amountCentimes)
+        let connection = NapsConnection(config: config)
+
+        do {
+            try await connection.connect()
+            let response = try await connection.sendAndReceive(tlvRequest, timeout: config.timeout)
+            connection.disconnect()
+
+            let fields = TLVProtocol.parse(response)
+            let responseCode = fields[TLVProtocol.Tags.CR] ?? ""
+            let mt = fields[TLVProtocol.Tags.TM] ?? ""
+            let success = (mt == TLVProtocol.MessageTypes.cancellationResponse ||
+                           mt == TLVProtocol.MessageTypes.cancellationCorrection) &&
+                          responseCode == "000"
+
+            return CancellationResult(
+                success: success,
+                responseCode: responseCode,
+                stan: fields[TLVProtocol.Tags.STAN],
+                error: success ? nil : "Cancellation failed with code: \(responseCode)"
+            )
+        } catch {
+            connection.disconnect()
+            return CancellationResult(success: false, responseCode: "", stan: nil,
+                                      error: error.localizedDescription)
+        }
+    }
+
     /// Test connection to terminal
     ///
     /// - Returns: true if connection successful, false otherwise
