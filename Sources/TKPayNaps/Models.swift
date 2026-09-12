@@ -12,17 +12,22 @@ public struct NapsConfig {
     public let timeout: TimeInterval
     /// Confirmation timeout in seconds (default: 40)
     public let confirmationTimeout: TimeInterval
+    /// NAPS TLV protocol version (default: v2). Selects the expected response
+    /// terminator: `!` for v2, `?` for v1. TCP/Sunmi terminals use v2.
+    public let protocolVersion: TLVProtocol.ProtocolVersion
 
     public init(
         host: String,
         port: Int = 4444,
         timeout: TimeInterval = 120,
-        confirmationTimeout: TimeInterval = 40
+        confirmationTimeout: TimeInterval = 40,
+        protocolVersion: TLVProtocol.ProtocolVersion = .v2
     ) {
         self.host = host
         self.port = port
         self.timeout = timeout
         self.confirmationTimeout = confirmationTimeout
+        self.protocolVersion = protocolVersion
     }
 }
 

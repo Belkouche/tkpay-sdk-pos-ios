@@ -64,9 +64,22 @@ let config = NapsConfig(
     host: "192.168.24.214",    // Terminal IP address
     port: 4444,                // Default: 4444
     timeout: 120,              // Payment timeout in seconds (default: 120)
-    confirmationTimeout: 40    // Confirmation timeout in seconds (default: 40)
+    confirmationTimeout: 40,   // Confirmation timeout in seconds (default: 40)
+    protocolVersion: .v2       // TLV protocol version (default: .v2)
 )
 ```
+
+### Protocol version (v1 / v2)
+
+The SDK speaks the NAPS TLV **v2** protocol by default (TCP/Sunmi terminals). The
+version selects the expected response terminator — `!` for v2, `?` for v1 — and the
+parser tolerates both. Set `protocolVersion: .v1` only when targeting a legacy
+terminal that ends messages with `?`.
+
+Under v2 the payment confirmation (TM=002) is enriched: it echoes the amount (MT/DE),
+the masked PAN (NCAR) and the card expiry (DAEX) from the approved payment response so
+the terminal can reinforce its coherence checks. This threading happens automatically
+inside `processPayment`.
 
 ## API Reference
 
@@ -166,13 +179,37 @@ struct NapsError: Error {
 
 ## Response Codes
 
+The full v2 §6 response-code table is built into the SDK. Look up a human-readable
+message for any CR code with `TLVProtocol.describeResponse(_:)`, and test for approval
+with `TLVProtocol.isApproved(_:)` (approved codes: `000`, `001`, `003`, `007`).
+
+```swift
+TLVProtocol.describeResponse("116")   // "Insufficient funds"
+TLVProtocol.isApproved("000")         // true
+```
+
+Common codes:
+
 | Code | Description |
 |------|-------------|
 | 000  | Approved |
-| 302  | Transaction not found |
-| 480  | Transaction cancelled |
+| 001  | Approved with identification |
+| 003  | Approved (VIP) |
+| 007  | Approved, microchip update required |
+| 100  | Do not honour |
+| 101  | Card expired |
+| 116  | Insufficient funds |
+| 117  | Incorrect PIN |
+| 120  | Transaction not permitted at terminal |
+| 280  | Alternative amount cancelled |
+| 302  | Record not found on file |
+| 307  | Format error |
+| 480  | Reversal accepted |
 | 482  | Transaction already cancelled |
-| 909  | Terminal or server is down |
+| 909  | System failure |
+| 911  | Issuer did not respond in time |
+| 912  | Card issuer unavailable |
+| 995  | Server processing error |
 
 ## Security
 

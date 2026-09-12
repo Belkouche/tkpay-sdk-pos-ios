@@ -86,12 +86,20 @@ public class NapsPayClient {
                 throw NapsError.invalidResponse("Missing STAN")
             }
 
-            // Phase 2: Confirmation (must be on same connection, within 40 seconds)
+            // Phase 2: Confirmation (must be on same connection, within 40 seconds).
+            // v2 §4.2: thread MT + NCAR + DAEX from the Phase-1 (TM=101) response
+            // so the terminal can reinforce its coherence checks. Prefer the amount
+            // echoed by the terminal (MT); fall back to the requested amount.
+            let confirmAmount = paymentResponse[TLVProtocol.Tags.MT].flatMap { Int($0) }
+                ?? Int((request.amount * 100).rounded())
             let confirmResponse = try await sendConfirmation(
                 connection: connection,
                 stan: stan,
                 ncai: ncai,
-                sequence: sequence
+                sequence: sequence,
+                amountCentimes: confirmAmount,
+                ncar: paymentResponse[TLVProtocol.Tags.NCAR],
+                daex: paymentResponse[TLVProtocol.Tags.DAEX]
             )
 
             connection.disconnect()
@@ -149,10 +157,13 @@ public class NapsPayClient {
         }
     }
 
-    /// Cancel (void) a previous transaction (TM=003)
+    /// Cancel (void) a previous transaction — two-phase flow (TM=003 → TM=004)
     ///
-    /// NapsPay v5.4.4+ requires the original amount and may respond with
-    /// MT=104 (correction) in addition to MT=103. Both are treated as success.
+    /// NapsPay v5.4.4+ requires the original amount (TAG 002) in the TM=003 frame.
+    /// Flow on a single TCP connection:
+    ///   1. Send TM=003 → terminal replies MT=103 (CR=000 = accepted)
+    ///   2. Send TM=004 echoing the amount from MT=103 → terminal replies
+    ///      MT=104 with the final result (CR=000/995 = success)
     ///
     /// - Parameters:
     ///   - stan: STAN of the transaction to cancel
@@ -174,21 +185,54 @@ public class NapsPayClient {
 
         do {
             try await connection.connect()
-            let response = try await connection.sendAndReceive(tlvRequest, timeout: config.timeout)
-            connection.disconnect()
 
+            // Phase 1: TM=003 → MT=103
+            let response = try await connection.sendAndReceive(tlvRequest, timeout: config.timeout)
             let fields = TLVProtocol.parse(response)
             let responseCode = fields[TLVProtocol.Tags.CR] ?? ""
             let mt = fields[TLVProtocol.Tags.TM] ?? ""
-            let success = (mt == TLVProtocol.MessageTypes.cancellationResponse ||
-                           mt == TLVProtocol.MessageTypes.cancellationCorrection) &&
-                          responseCode == "000"
+
+            // MT=104 direct means already finalised (single-phase firmware)
+            if mt == TLVProtocol.MessageTypes.cancellationCorrection {
+                connection.disconnect()
+                return CancellationResult(
+                    success: responseCode == "000",
+                    responseCode: responseCode,
+                    stan: fields[TLVProtocol.Tags.STAN],
+                    error: responseCode == "000" ? nil : "Cancellation failed with code: \(responseCode)"
+                )
+            }
+
+            guard mt == TLVProtocol.MessageTypes.cancellationResponse, responseCode == "000" else {
+                connection.disconnect()
+                return CancellationResult(
+                    success: false,
+                    responseCode: responseCode,
+                    stan: fields[TLVProtocol.Tags.STAN],
+                    error: "Cancellation failed with code: \(responseCode)"
+                )
+            }
+
+            // Phase 2: TM=004 on the same connection, echoing the amount from MT=103
+            let confirmRequest = TLVProtocol.buildCancellationConfirmation(
+                stan: fields[TLVProtocol.Tags.STAN] ?? stan,
+                ncai: ncai,
+                sequence: sequence,
+                amount: fields[TLVProtocol.Tags.MT]
+            )
+            let confirmResponse = try await connection.sendAndReceive(confirmRequest, timeout: config.confirmationTimeout)
+            connection.disconnect()
+
+            let fields2 = TLVProtocol.parse(confirmResponse)
+            let cr2 = fields2[TLVProtocol.Tags.CR] ?? ""
+            // CR=000 = confirmed, CR=995 = host processing (also success)
+            let success2 = cr2 == "000" || cr2 == "995"
 
             return CancellationResult(
-                success: success,
-                responseCode: responseCode,
-                stan: fields[TLVProtocol.Tags.STAN],
-                error: success ? nil : "Cancellation failed with code: \(responseCode)"
+                success: success2,
+                responseCode: cr2,
+                stan: fields2[TLVProtocol.Tags.STAN] ?? fields[TLVProtocol.Tags.STAN],
+                error: success2 ? nil : "Cancellation failed with code: \(cr2)"
             )
         } catch {
             connection.disconnect()
@@ -260,12 +304,18 @@ public class NapsPayClient {
         connection: NapsConnection,
         stan: String,
         ncai: String,
-        sequence: String
+        sequence: String,
+        amountCentimes: Int? = nil,
+        ncar: String? = nil,
+        daex: String? = nil
     ) async throws -> [String: String] {
         let tlvConfirm = TLVProtocol.buildConfirmationRequest(
             stan: stan,
             ncai: ncai,
-            sequence: sequence
+            sequence: sequence,
+            amountCentimes: amountCentimes,
+            ncar: ncar,
+            daex: daex
         )
 
         let response = try await connection.sendAndReceive(tlvConfirm, timeout: config.confirmationTimeout)
@@ -298,19 +348,10 @@ public class NapsPayClient {
     }
 
     private func buildFailedResult(responseCode: String, fields: [String: String]) -> PaymentResult {
-        let errorMessage: String
-        switch responseCode {
-        case "909":
-            errorMessage = "Terminal or server is down"
-        case "302":
-            errorMessage = "Transaction not found"
-        case "482":
-            errorMessage = "Transaction already cancelled"
-        case "480":
-            errorMessage = "Transaction cancelled"
-        default:
-            errorMessage = "Payment declined with code: \(responseCode)"
-        }
+        // Use the §6 response-code table for a human-readable message; fall back
+        // to a generic string for codes not in the table.
+        let errorMessage = TLVProtocol.responseCodes[responseCode]
+            ?? "Payment declined with code: \(responseCode)"
 
         return PaymentResult(
             success: false,

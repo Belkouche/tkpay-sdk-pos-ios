@@ -40,6 +40,125 @@ final class TKPayNapsTests: XCTestCase {
         XCTAssertEqual(masked, "Card: 516794******3315 was used")
     }
 
+    // MARK: - v2 Confirmation Tests
+
+    func testConfirmationOmitsOptionalFieldsByDefault() {
+        // Old callers (no amount/ncar/daex) must still produce a valid frame
+        // without MT, DE, NCAR or DAEX.
+        let msg = TLVProtocol.buildConfirmationRequest(
+            stan: "123456", ncai: "0100001", sequence: "000001")
+        let fields = TLVProtocol.parse(msg)
+
+        XCTAssertEqual(fields[TLVProtocol.Tags.TM], TLVProtocol.MessageTypes.confirmationRequest)
+        XCTAssertEqual(fields[TLVProtocol.Tags.STAN], "123456")
+        XCTAssertEqual(fields[TLVProtocol.Tags.NCAI], "0100001")
+        XCTAssertEqual(fields[TLVProtocol.Tags.NS], "000001")
+        XCTAssertNil(fields[TLVProtocol.Tags.MT])
+        XCTAssertNil(fields[TLVProtocol.Tags.DE])
+        XCTAssertNil(fields[TLVProtocol.Tags.NCAR])
+        XCTAssertNil(fields[TLVProtocol.Tags.DAEX])
+    }
+
+    func testConfirmationCarriesEnrichedFields() {
+        let msg = TLVProtocol.buildConfirmationRequest(
+            stan: "123456",
+            ncai: "0100001",
+            sequence: "000001",
+            amountCentimes: 10000,
+            ncar: "516794******3315",
+            daex: "2512"
+        )
+        let fields = TLVProtocol.parse(msg)
+
+        XCTAssertEqual(fields[TLVProtocol.Tags.MT], "10000")
+        XCTAssertEqual(fields[TLVProtocol.Tags.DE], TLVProtocol.Currency.MAD)
+        XCTAssertEqual(fields[TLVProtocol.Tags.STAN], "123456")
+        XCTAssertEqual(fields[TLVProtocol.Tags.DAEX], "2512")
+        // NCAR is re-masked by parse (tag 007), but an already-masked value round-trips.
+        XCTAssertEqual(fields[TLVProtocol.Tags.NCAR], "516794******3315")
+    }
+
+    func testConfirmationFieldOrder() {
+        // Field order must be TM, NCAI, NS, MT, DE, STAN, NCAR, DAEX, DA, HE.
+        // Build the deterministic prefix (everything up to the trailing DA/HE, whose
+        // values depend on wall-clock time) and assert the frame starts with it.
+        let msg = TLVProtocol.buildConfirmationRequest(
+            stan: "123456",
+            ncai: "0100001",
+            sequence: "000001",
+            amountCentimes: 10000,
+            ncar: "516794******3315",
+            daex: "2512"
+        )
+        let expectedPrefix =
+            TLVProtocol.buildField(tag: TLVProtocol.Tags.TM, value: TLVProtocol.MessageTypes.confirmationRequest)
+            + TLVProtocol.buildField(tag: TLVProtocol.Tags.NCAI, value: "0100001")
+            + TLVProtocol.buildField(tag: TLVProtocol.Tags.NS, value: "000001")
+            + TLVProtocol.buildField(tag: TLVProtocol.Tags.MT, value: "10000")
+            + TLVProtocol.buildField(tag: TLVProtocol.Tags.DE, value: TLVProtocol.Currency.MAD)
+            + TLVProtocol.buildField(tag: TLVProtocol.Tags.STAN, value: "123456")
+            + TLVProtocol.buildField(tag: TLVProtocol.Tags.NCAR, value: "516794******3315")
+            + TLVProtocol.buildField(tag: TLVProtocol.Tags.DAEX, value: "2512")
+        XCTAssertTrue(msg.hasPrefix(expectedPrefix), "Confirmation fields out of order.\nGot: \(msg)")
+    }
+
+    // MARK: - Terminator Tests
+
+    func testParseStopsAtV2Terminator() {
+        let tlv = "001003002008006123456RECEIPTGARBAGE!004006000001"
+        let fields = TLVProtocol.parse(tlv)
+        XCTAssertEqual(fields[TLVProtocol.Tags.TM], "002")
+        XCTAssertEqual(fields[TLVProtocol.Tags.STAN], "123456")
+        // Nothing after '!' should be parsed.
+        XCTAssertNil(fields["004"])
+    }
+
+    func testParseStopsAtV1Terminator() {
+        let tlv = "001003002008006123456?trailing"
+        let fields = TLVProtocol.parse(tlv)
+        XCTAssertEqual(fields[TLVProtocol.Tags.TM], "002")
+        XCTAssertEqual(fields[TLVProtocol.Tags.STAN], "123456")
+    }
+
+    func testProtocolVersionTerminators() {
+        XCTAssertEqual(TLVProtocol.ProtocolVersion.v2.terminator, "!")
+        XCTAssertEqual(TLVProtocol.ProtocolVersion.v1.terminator, "?")
+    }
+
+    func testDefaultProtocolVersionIsV2() {
+        let config = NapsConfig(host: "192.168.1.1")
+        XCTAssertEqual(config.protocolVersion, .v2)
+    }
+
+    func testExplicitProtocolVersionOverride() {
+        let config = NapsConfig(host: "192.168.1.1", protocolVersion: .v1)
+        XCTAssertEqual(config.protocolVersion, .v1)
+    }
+
+    // MARK: - Response Code (§6) Tests
+
+    func testDescribeKnownResponse() {
+        XCTAssertEqual(TLVProtocol.describeResponse("000"), "Approved")
+        XCTAssertEqual(TLVProtocol.describeResponse("116"), "Insufficient funds")
+        XCTAssertEqual(TLVProtocol.describeResponse("480"), "Reversal accepted")
+        XCTAssertEqual(TLVProtocol.describeResponse("995"), "Server processing error")
+    }
+
+    func testDescribeUnknownResponse() {
+        XCTAssertEqual(TLVProtocol.describeResponse("777"), "Unknown response code: 777")
+        XCTAssertEqual(TLVProtocol.describeResponse(nil), "Unknown response code: (none)")
+    }
+
+    func testApprovedCodes() {
+        for code in ["000", "001", "003", "007"] {
+            XCTAssertTrue(TLVProtocol.isApproved(code), "\(code) should be approved")
+        }
+        for code in ["100", "116", "480", "909"] {
+            XCTAssertFalse(TLVProtocol.isApproved(code), "\(code) should not be approved")
+        }
+        XCTAssertFalse(TLVProtocol.isApproved(nil))
+    }
+
     // MARK: - Models Tests
 
     func testPaymentRequestNCAI() {
