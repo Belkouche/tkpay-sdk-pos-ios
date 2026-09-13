@@ -1,5 +1,14 @@
 # TKPay NAPS iOS SDK
 
+> Part of the NAPS SDK family — all speak the same M2M TLV protocol to the same terminals.
+> The **[C# SDK](https://github.com/Belkouche/tkpay-sdk-pos-naps-csharp) is canonical**
+> (reference implementation); this is the iOS port. Siblings:
+> [Node.js](https://github.com/Belkouche/aslan-naps-node) ·
+> [Android](https://github.com/Belkouche/tkpay-sdk-pos-android) ·
+> [React Native](https://github.com/Belkouche/tkpay-sdk-pos-rn).
+> Test without hardware using the [emulator](https://github.com/Belkouche/tkpay-naps-emulator).
+> (iOS is TCP-only — Sunmi P2/P3; iOS has no USB-serial-to-terminal API.)
+
 Native iOS SDK for integrating NAPS Pay terminals with your iOS applications.
 
 ## Requirements
