@@ -205,6 +205,40 @@ public struct CancellationResult {
     public let error: String?
 }
 
+// MARK: - Management Results
+
+/// Network test result for TM=009
+public struct NetworkTestResult {
+    /// Whether the terminal reached the NAPS host (RC=000)
+    public let success: Bool
+    /// Response code (000 = success)
+    public let responseCode: String
+    /// "Network OK" on success, otherwise the response-code description
+    public let message: String
+}
+
+/// Referencing result for TM=013 (parameter-set load)
+public struct ReferencingResult {
+    /// Whether the parameter set was loaded (RC=000)
+    public let success: Bool
+    /// Response code (000 = success)
+    public let responseCode: String
+    /// TIDE parameter set requested ("01" merchant, "02" recharge)
+    public let parameterSet: String
+    /// Raw printable data (DP) returned by the terminal, if any
+    public let receiptText: String?
+}
+
+/// Totals report result for TM=010
+public struct TotalsResult {
+    /// Whether the totals were returned (RC=000)
+    public let success: Bool
+    /// Response code (000 = success)
+    public let responseCode: String
+    /// Raw printable data (DP) returned by the terminal, if any
+    public let receiptText: String?
+}
+
 // MARK: - Errors
 
 /// Error codes

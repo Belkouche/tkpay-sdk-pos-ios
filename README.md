@@ -10,6 +10,7 @@
 > (iOS is TCP-only — Sunmi P2/P3; iOS has no USB-serial-to-terminal API.)
 
 Native iOS SDK for integrating NAPS Pay terminals with your iOS applications.
+Protocol baseline: TLV Protocol Specification v2.0 / NapsPay v5.4.4.
 
 ## Requirements
 
@@ -26,7 +27,7 @@ Add the package to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/Belkouche/tkpay-sdk-pos-naps-ios.git", from: "1.0.0")
+    .package(url: "https://github.com/Belkouche/tkpay-sdk-pos-naps-ios.git", from: "1.3.0")
 ]
 ```
 
@@ -107,6 +108,18 @@ Process a payment transaction using the two-phase flow:
 ```swift
 let result = try await client.processPayment(request)
 ```
+
+##### Management operations
+
+```swift
+let ping   = try await client.networkTest()                 // TM=009 → NetworkTestResult
+let ref    = try await client.referencing(tide: TLVProtocol.Tide.merchant) // TM=013 → ReferencingResult
+let totals = try await client.totals()                      // TM=010 → TotalsResult
+let copy   = try await client.duplicateReceipt()            // TM=008 → PaymentResult
+try await client.resetPinPad()                              // TM=012
+```
+
+Each accepts optional `registerId` (default `"01"`) and `cashierId` (default `"00001"`).
 
 ##### `testConnection() async -> Bool`
 

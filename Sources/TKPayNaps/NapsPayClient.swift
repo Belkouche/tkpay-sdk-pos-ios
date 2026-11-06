@@ -104,8 +104,8 @@ public class NapsPayClient {
 
             connection.disconnect()
 
-            // Build successful result
-            let result = buildSuccessResult(fields: confirmResponse)
+            // Build successful result — merchant copy from Phase 1, customer copy from Phase 2
+            let result = buildSuccessResult(phase1Fields: paymentResponse, fields: confirmResponse)
 
             // Send notification to gateway
             GatewayNotifier.notifyTransaction(
@@ -149,7 +149,7 @@ public class NapsPayClient {
                 responseCode: responseCode,
                 date: fields[TLVProtocol.Tags.DA],
                 time: fields[TLVProtocol.Tags.HE],
-                error: responseCode != "000" ? "Settlement failed with code: \(responseCode)" : nil
+                error: responseCode != "000" ? settlementError(responseCode) : nil
             )
         } catch {
             connection.disconnect()
@@ -241,6 +241,63 @@ public class NapsPayClient {
         }
     }
 
+    /// Network test / ping (TM=009). Verifies the terminal can reach the NAPS host.
+    public func networkTest(registerId: String = "01", cashierId: String = "00001") async throws -> NetworkTestResult {
+        let fields = try await sendManagement(
+            TLVProtocol.buildNetworkTestRequest(ncai: registerId + cashierId, sequence: generateSequence()))
+        let rc = fields[TLVProtocol.Tags.CR] ?? ""
+        return NetworkTestResult(
+            success: rc == "000",
+            responseCode: rc,
+            message: rc == "000" ? "Network OK" : TLVProtocol.describeResponse(rc)
+        )
+    }
+
+    /// Referencing (TM=013) — loads a terminal parameter set selected by TIDE (020).
+    ///
+    /// - Parameter tide: Parameter set: "01" merchant (default), "02" recharge
+    public func referencing(
+        tide: String = TLVProtocol.Tide.merchant,
+        registerId: String = "01",
+        cashierId: String = "00001"
+    ) async throws -> ReferencingResult {
+        let fields = try await sendManagement(
+            TLVProtocol.buildReferencingRequest(tide: tide, ncai: registerId + cashierId, sequence: generateSequence()))
+        let rc = fields[TLVProtocol.Tags.CR] ?? ""
+        return ReferencingResult(
+            success: rc == "000",
+            responseCode: rc,
+            parameterSet: tide,
+            receiptText: fields[TLVProtocol.Tags.DP]
+        )
+    }
+
+    /// Totals report (TM=010). Requests the terminal's running batch totals.
+    public func totals(registerId: String = "01", cashierId: String = "00001") async throws -> TotalsResult {
+        let fields = try await sendManagement(
+            TLVProtocol.buildTotalsRequest(ncai: registerId + cashierId, sequence: generateSequence()))
+        let rc = fields[TLVProtocol.Tags.CR] ?? ""
+        return TotalsResult(success: rc == "000", responseCode: rc, receiptText: fields[TLVProtocol.Tags.DP])
+    }
+
+    /// Duplicate receipt / reprint (TM=008). Reprints the last transaction's receipt.
+    public func duplicateReceipt(registerId: String = "01", cashierId: String = "00001") async throws -> PaymentResult {
+        let fields = try await sendManagement(
+            TLVProtocol.buildDuplicateReceiptRequest(ncai: registerId + cashierId, sequence: generateSequence()))
+        let rc = fields[TLVProtocol.Tags.CR] ?? ""
+        guard rc == "000" else {
+            return buildFailedResult(responseCode: rc, fields: fields)
+        }
+        let merchantReceipt = fields[TLVProtocol.Tags.DP].map { TLVProtocol.parseReceipt($0, type: .merchant) }
+        return buildSuccessResult(fields: fields, merchantReceipt: merchantReceipt, customerReceipt: nil)
+    }
+
+    /// Reset the PIN pad (TM=012). Fire-and-forget maintenance command.
+    public func resetPinPad(registerId: String = "01", cashierId: String = "00001") async throws {
+        _ = try await sendManagement(
+            TLVProtocol.buildResetPinPadRequest(ncai: registerId + cashierId, sequence: generateSequence()))
+    }
+
     /// Test connection to terminal
     ///
     /// - Returns: true if connection successful, false otherwise
@@ -272,6 +329,26 @@ public class NapsPayClient {
         }
         guard request.cashierId.count == 5 else {
             throw NapsError(code: .invalidResponse, message: "Cashier ID must be 5 digits")
+        }
+        if let sequence = request.sequence, sequence.count != 6 {
+            throw NapsError(code: .invalidResponse, message: "Sequence must be 6 digits")
+        }
+    }
+
+    /// Open a connection, send a single management TLV frame and parse the response.
+    private func sendManagement(_ tlv: String) async throws -> [String: String] {
+        let connection = NapsConnection(config: config)
+        defer { connection.disconnect() }
+        try await connection.connect()
+        let response = try await connection.sendAndReceive(tlv, timeout: config.timeout)
+        return TLVProtocol.parse(response)
+    }
+
+    private func settlementError(_ responseCode: String) -> String {
+        switch responseCode {
+        case "052": return "Already settled today"
+        case "909": return "Terminal or server is down"
+        default: return "Settlement failed with code: \(responseCode)"
         }
     }
 
@@ -322,12 +399,19 @@ public class NapsPayClient {
         return TLVProtocol.parse(response)
     }
 
-    private func buildSuccessResult(fields: [String: String]) -> PaymentResult {
-        // Parse receipts
-        let dpValue = fields[TLVProtocol.Tags.DP]
-        let merchantReceipt = dpValue.map { TLVProtocol.parseReceipt($0, type: .merchant) }
-        let customerReceipt = dpValue.map { TLVProtocol.parseReceipt($0, type: .customer) }
+    private func buildSuccessResult(phase1Fields: [String: String], fields: [String: String]) -> PaymentResult {
+        // The terminal returns the merchant copy with Phase 1 (TM=101) and the
+        // customer copy with Phase 2 (TM=102).
+        let merchantReceipt = phase1Fields[TLVProtocol.Tags.DP].map { TLVProtocol.parseReceipt($0, type: .merchant) }
+        let customerReceipt = fields[TLVProtocol.Tags.DP].map { TLVProtocol.parseReceipt($0, type: .customer) }
+        return buildSuccessResult(fields: fields, merchantReceipt: merchantReceipt, customerReceipt: customerReceipt)
+    }
 
+    private func buildSuccessResult(
+        fields: [String: String],
+        merchantReceipt: Receipt?,
+        customerReceipt: Receipt?
+    ) -> PaymentResult {
         return PaymentResult(
             success: true,
             responseCode: fields[TLVProtocol.Tags.CR] ?? "000",
@@ -350,14 +434,25 @@ public class NapsPayClient {
     private func buildFailedResult(responseCode: String, fields: [String: String]) -> PaymentResult {
         // Use the §6 response-code table for a human-readable message; fall back
         // to a generic string for codes not in the table.
-        let errorMessage = TLVProtocol.responseCodes[responseCode]
-            ?? "Payment declined with code: \(responseCode)"
+        let errorMessage: String
+        switch responseCode {
+        case "909": errorMessage = "Terminal or server is down"
+        case "302": errorMessage = "Transaction not found"
+        case "482": errorMessage = "Transaction already cancelled"
+        case "480": errorMessage = "Transaction cancelled"
+        default:
+            errorMessage = TLVProtocol.responseCodes[responseCode].map { "\($0) — code: \(responseCode)" }
+                ?? "Payment declined — code: \(responseCode)"
+        }
+
+        // Declines may carry a printable refusal receipt (DP)
+        let declineReceipt = fields[TLVProtocol.Tags.DP].map { TLVProtocol.parseReceipt($0, type: .merchant) }
 
         return PaymentResult(
             success: false,
             responseCode: responseCode,
             stan: fields[TLVProtocol.Tags.STAN],
-            maskedCardNumber: nil,
+            maskedCardNumber: fields[TLVProtocol.Tags.NCAR],
             cardExpiry: nil,
             cardholderName: nil,
             entryMode: nil,
@@ -366,7 +461,7 @@ public class NapsPayClient {
             sequence: nil,
             transactionDate: nil,
             transactionTime: nil,
-            merchantReceipt: nil,
+            merchantReceipt: declineReceipt,
             customerReceipt: nil,
             error: errorMessage
         )

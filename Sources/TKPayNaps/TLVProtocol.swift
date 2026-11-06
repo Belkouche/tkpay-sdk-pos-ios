@@ -9,7 +9,8 @@ import Foundation
 ///
 /// Example: 001003001 = Tag 001, Length 003, Value "001"
 ///
-/// Tag mapping sourced from decompiled NAPS Pay v5.0.3
+/// Tag mapping sourced from decompiled NAPS Pay v5.0.3; protocol baseline is
+/// TLV Protocol Specification v2.0 / NapsPay v5.4.4.
 public enum TLVProtocol {
 
     // MARK: - Tags
@@ -60,6 +61,17 @@ public enum TLVProtocol {
         public static let cancellationCorrection = "104"
         public static let settlementRequest = "010"
         public static let settlementResponse = "110"
+        public static let duplicateReceipt = "008"     // Reprint last receipt
+        public static let networkTest = "009"          // Ping / network test
+        public static let totals = "010"               // Totals report (shares TM with settlement)
+        public static let resetPinPad = "012"          // Reset the PIN pad
+        public static let referencing = "013"          // Load parameter set (referencement)
+    }
+
+    /// TIDE (020) parameter sets for referencing (TM=013)
+    public enum Tide {
+        public static let merchant = "01"
+        public static let recharge = "02"
     }
 
     /// Receipt Sub-tags (within DP/010)
@@ -204,7 +216,8 @@ public enum TLVProtocol {
         return "\(tag)\(length)\(value)"
     }
 
-    /// Build payment request TLV
+    /// Build payment request TLV (TM=001).
+    /// Sends the current date/time in both DA/HE (local clock) and DATR/HETR (transaction).
     public static func buildPaymentRequest(
         amount: Double,
         ncai: String,
@@ -218,6 +231,8 @@ public enum TLVProtocol {
             + buildField(tag: Tags.NCAI, value: ncai)
             + buildField(tag: Tags.NS, value: sequence)
             + buildField(tag: Tags.DE, value: Currency.MAD)
+            + buildField(tag: Tags.DA, value: dateTime.date)
+            + buildField(tag: Tags.HE, value: dateTime.time)
             + buildField(tag: Tags.DATR, value: dateTime.date)
             + buildField(tag: Tags.HETR, value: dateTime.time)
     }
@@ -323,6 +338,63 @@ public enum TLVProtocol {
             + buildField(tag: Tags.HE, value: dateTime.time)
     }
 
+    // MARK: - Management Requests (TM 008/009/010/012/013)
+
+    /// Build a management-operation TLV frame: TM + NCAI + NS + DA + HE (+ optional
+    /// extra fields). Used by the network test, totals, duplicate-receipt, reset and
+    /// referencing operations, which carry no amount.
+    public static func buildManagementRequest(
+        tm: String,
+        ncai: String = "0100001",
+        sequence: String = "000001",
+        extraFields: [(tag: String, value: String)] = []
+    ) -> String {
+        let dateTime = getCurrentDateTime()
+
+        var msg = buildField(tag: Tags.TM, value: tm)
+            + buildField(tag: Tags.NCAI, value: ncai)
+            + buildField(tag: Tags.NS, value: sequence)
+            + buildField(tag: Tags.DA, value: dateTime.date)
+            + buildField(tag: Tags.HE, value: dateTime.time)
+
+        for field in extraFields {
+            msg += buildField(tag: field.tag, value: field.value)
+        }
+
+        return msg
+    }
+
+    /// Build a network-test request (TM=009)
+    public static func buildNetworkTestRequest(ncai: String = "0100001", sequence: String = "000001") -> String {
+        return buildManagementRequest(tm: MessageTypes.networkTest, ncai: ncai, sequence: sequence)
+    }
+
+    /// Build a referencing request (TM=013) carrying the TIDE (020) parameter set:
+    /// "01" merchant, "02" recharge.
+    public static func buildReferencingRequest(
+        tide: String = Tide.merchant,
+        ncai: String = "0100001",
+        sequence: String = "000001"
+    ) -> String {
+        return buildManagementRequest(tm: MessageTypes.referencing, ncai: ncai, sequence: sequence,
+                                      extraFields: [(Tags.TIDE, tide)])
+    }
+
+    /// Build a totals-report request (TM=010)
+    public static func buildTotalsRequest(ncai: String = "0100001", sequence: String = "000001") -> String {
+        return buildManagementRequest(tm: MessageTypes.totals, ncai: ncai, sequence: sequence)
+    }
+
+    /// Build a duplicate-receipt (reprint) request (TM=008)
+    public static func buildDuplicateReceiptRequest(ncai: String = "0100001", sequence: String = "000001") -> String {
+        return buildManagementRequest(tm: MessageTypes.duplicateReceipt, ncai: ncai, sequence: sequence)
+    }
+
+    /// Build a reset-PIN-pad request (TM=012)
+    public static func buildResetPinPadRequest(ncai: String = "0100001", sequence: String = "000001") -> String {
+        return buildManagementRequest(tm: MessageTypes.resetPinPad, ncai: ncai, sequence: sequence)
+    }
+
     // MARK: - Parsing TLV
 
     /// Parse TLV string into fields dictionary.
@@ -377,56 +449,48 @@ public enum TLVProtocol {
 
     // MARK: - Receipt Parsing
 
-    /// Parse receipt data from DP tag value
+    /// Parse receipt data from DP tag value.
+    ///
+    /// The terminal separates receipt entry groups with `*`; each group is
+    /// 030(line number) 031(format) 032(alignment) 033(content). Splitting on `*`
+    /// keeps digit runs inside a value (e.g. a PAN containing "030002") from being
+    /// misread as sub-tags.
     public static func parseReceipt(_ dpValue: String, type: ReceiptType) -> Receipt {
         var lines: [ReceiptLine] = []
-        var index = dpValue.startIndex
-        var lineNumber = ""
-        var format = "S"
-        var alignmentCode = "G"
-        var content = ""
 
-        while index < dpValue.endIndex {
-            guard dpValue.distance(from: index, to: dpValue.endIndex) >= 6 else { break }
+        for entry in dpValue.split(separator: "*", omittingEmptySubsequences: true) {
+            let entry = String(entry)
+            var index = entry.startIndex
+            var lineNumber = ""
+            var format = "S"
+            var alignmentCode = "G"
+            var content = ""
 
-            let tagEnd = dpValue.index(index, offsetBy: 3)
-            let tag = String(dpValue[index..<tagEnd])
+            while entry.distance(from: index, to: entry.endIndex) >= 6 {
+                let tagEnd = entry.index(index, offsetBy: 3)
+                let tag = String(entry[index..<tagEnd])
 
-            let lengthEnd = dpValue.index(tagEnd, offsetBy: 3)
-            let lengthStr = String(dpValue[tagEnd..<lengthEnd])
+                let lengthEnd = entry.index(tagEnd, offsetBy: 3)
+                guard let length = Int(entry[tagEnd..<lengthEnd]) else { break }
+                guard entry.distance(from: lengthEnd, to: entry.endIndex) >= length else { break }
 
-            guard let length = Int(lengthStr) else { break }
-            guard dpValue.distance(from: lengthEnd, to: dpValue.endIndex) >= length else { break }
+                let valueEnd = entry.index(lengthEnd, offsetBy: length)
+                let value = String(entry[lengthEnd..<valueEnd])
 
-            let valueEnd = dpValue.index(lengthEnd, offsetBy: length)
-            let value = String(dpValue[lengthEnd..<valueEnd])
-
-            switch tag {
-            case ReceiptTags.lineNumber:
-                // Save previous line if exists
-                if !lineNumber.isEmpty && !content.isEmpty {
-                    lines.append(createReceiptLine(lineNumber, content, format, alignmentCode))
+                switch tag {
+                case ReceiptTags.lineNumber: lineNumber = value
+                case ReceiptTags.format: format = value
+                case ReceiptTags.alignment: alignmentCode = value
+                case ReceiptTags.content: content = value
+                default: break
                 }
-                lineNumber = value
-                format = "S"
-                alignmentCode = "G"
-                content = ""
-            case ReceiptTags.format:
-                format = value
-            case ReceiptTags.alignment:
-                alignmentCode = value
-            case ReceiptTags.content:
-                content = value
-            default:
-                break
+
+                index = valueEnd
             }
 
-            index = valueEnd
-        }
-
-        // Don't forget the last line
-        if !lineNumber.isEmpty && !content.isEmpty {
-            lines.append(createReceiptLine(lineNumber, content, format, alignmentCode))
+            if !lineNumber.isEmpty {
+                lines.append(createReceiptLine(lineNumber, content, format, alignmentCode))
+            }
         }
 
         // Apply TKPAY branding
@@ -521,37 +585,16 @@ public enum TLVProtocol {
         )
     }
 
+    /// Replace centred "Naps" header lines with "TKPAY" and append "Powered by NAPS"
+    /// as the last line (matches the reference SDK).
     private static func applyBranding(_ lines: [ReceiptLine]) -> [ReceiptLine] {
-        var result: [ReceiptLine] = []
-        var brandingApplied = false
-
-        for line in lines {
-            if !brandingApplied &&
-               line.text.lowercased().contains("naps") &&
-               line.alignment == .center {
-
-                // Replace with TKPAY header
-                result.append(ReceiptLine(
-                    lineNumber: line.lineNumber,
-                    text: "TKPAY",
-                    bold: true,
-                    alignment: .center
-                ))
-
-                // Add "Powered by NAPS" below
-                let nextLineNum = String(format: "%02d", (Int(line.lineNumber) ?? 0) + 1)
-                result.append(ReceiptLine(
-                    lineNumber: nextLineNum,
-                    text: "Powered by NAPS",
-                    bold: false,
-                    alignment: .center
-                ))
-
-                brandingApplied = true
-            } else {
-                result.append(line)
-            }
+        var result = lines.map { line -> ReceiptLine in
+            guard line.alignment == .center, line.text.lowercased().contains("naps") else { return line }
+            return ReceiptLine(lineNumber: line.lineNumber, text: "TKPAY", bold: true, alignment: .center)
         }
+
+        let lastNumber = result.last.flatMap { Int($0.lineNumber) }.map { String(format: "%02d", $0 + 1) } ?? "99"
+        result.append(ReceiptLine(lineNumber: lastNumber, text: "Powered by NAPS", bold: false, alignment: .center))
 
         return result
     }

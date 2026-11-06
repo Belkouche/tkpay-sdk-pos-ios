@@ -12,6 +12,10 @@ public class NapsConnection {
     private let config: NapsConfig
     private var connection: NWConnection?
     private let queue = DispatchQueue(label: "ma.tkpay.naps.connection")
+    // Receive state — only touched on `queue`
+    private var receiveOutstanding = false
+    private var leftover = Data()
+    private var chunkHandler: ((Data?, Bool, NWError?) -> Void)?
 
     public init(config: NapsConfig) {
         self.config = config
@@ -86,11 +90,28 @@ public class NapsConnection {
         let effectiveTimeout = timeout ?? config.timeout
         let response = try await receive(timeout: effectiveTimeout)
 
-        guard let responseString = String(data: response, encoding: .utf8), !responseString.isEmpty else {
+        guard var responseString = String(data: response, encoding: .utf8), !responseString.isEmpty else {
             throw NapsError.invalidResponse("Empty response from terminal")
         }
 
+        // Strip the trailing terminator ('!' v2, '?' v1) if present
+        if let term = responseString.lastIndex(where: { NapsConnection.isTerminator($0) }) {
+            responseString = String(responseString[..<term])
+        }
+
         return responseString
+    }
+
+    /// End-of-message terminators: '!' (v2, NapsPay v5.4.4+) and '?' (v1). Both are
+    /// always accepted so the reader tolerates a mismatch with the configured version.
+    static func isTerminator(_ c: Character) -> Bool {
+        return c == "!" || c == "?"
+    }
+
+    /// Whether a received buffer ends with an end-of-message terminator.
+    static func endsWithTerminator(_ data: Data) -> Bool {
+        guard let last = data.last else { return false }
+        return last == UInt8(ascii: "!") || last == UInt8(ascii: "?")
     }
 
     /// Disconnect from terminal
@@ -144,13 +165,47 @@ public class NapsConnection {
         }
     }
 
+    /// Read until the end-of-message terminator ('!' v2, '?' v1) is received, or until
+    /// 1 second of silence after the first chunk (fallback for partial frames).
+    /// The overall timeout is enforced by `receive(timeout:)`.
     private func receiveData(completion: @escaping (Result<Data, Error>) -> Void) {
-        var receivedData = Data()
+        queue.async { [weak self] in
+            guard let self = self else { return }
+            // Bytes that arrived after a previous read ended on the silence fallback
+            var receivedData = self.leftover
+            self.leftover = Data()
+            var chunkCount = 0
+            var finished = false
 
-        func receiveMore() {
-            connection?.receive(minimumIncompleteLength: 1, maximumLength: 8192) { [weak self] content, _, isComplete, error in
+            // Everything below runs on `queue` (NWConnection callbacks and asyncAfter share it).
+            func finish(_ result: Result<Data, Error>) {
+                guard !finished else { return }
+                finished = true
+                self.chunkHandler = nil
+                completion(result)
+            }
+
+            func armSilenceFallback() {
+                chunkCount += 1
+                let chunkAtArm = chunkCount
+                self.queue.asyncAfter(deadline: .now() + 1.0) {
+                    if chunkCount == chunkAtArm {
+                        finish(.success(receivedData))
+                    }
+                }
+            }
+
+            if NapsConnection.endsWithTerminator(receivedData) {
+                finish(.success(receivedData))
+                return
+            }
+            if !receivedData.isEmpty {
+                armSilenceFallback()
+            }
+
+            self.chunkHandler = { content, isComplete, error in
                 if let error = error {
-                    completion(.failure(NapsError.connectionFailed(error.localizedDescription)))
+                    finish(.failure(NapsError.connectionFailed(error.localizedDescription)))
                     return
                 }
 
@@ -158,32 +213,38 @@ public class NapsConnection {
                     receivedData.append(data)
                 }
 
-                if isComplete || content == nil {
+                if isComplete || content == nil || NapsConnection.endsWithTerminator(receivedData) {
                     if receivedData.isEmpty {
-                        completion(.failure(NapsError.invalidResponse("Empty response")))
+                        finish(.failure(NapsError.invalidResponse("Empty response")))
                     } else {
-                        completion(.success(receivedData))
+                        finish(.success(receivedData))
                     }
                     return
                 }
 
-                // Check if more data is available after a short delay
-                self?.queue.asyncAfter(deadline: .now() + 0.5) {
-                    // Try to receive more data with a short timeout
-                    self?.connection?.receive(minimumIncompleteLength: 1, maximumLength: 8192) { additionalContent, _, _, _ in
-                        if let additionalData = additionalContent, !additionalData.isEmpty {
-                            receivedData.append(additionalData)
-                            receiveMore()
-                        } else {
-                            // No more data, return what we have
-                            completion(.success(receivedData))
-                        }
-                    }
-                }
+                // No terminator yet: keep reading, but treat 1 s of silence as end-of-message
+                armSilenceFallback()
+                self.pumpReceive()
+            }
+            self.pumpReceive()
+        }
+    }
+
+    /// Issue a single outstanding receive. A receive left pending after a read
+    /// finished (silence fallback / timeout) is reused by the next read, and any
+    /// bytes it delivers with no active reader are kept in `leftover`.
+    private func pumpReceive() {
+        guard !receiveOutstanding, let connection = connection else { return }
+        receiveOutstanding = true
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 8192) { [weak self] content, _, isComplete, error in
+            guard let self = self else { return }
+            self.receiveOutstanding = false
+            if let handler = self.chunkHandler {
+                handler(content, isComplete, error)
+            } else if let data = content {
+                self.leftover.append(data)
             }
         }
-
-        receiveMore()
     }
 
     deinit {

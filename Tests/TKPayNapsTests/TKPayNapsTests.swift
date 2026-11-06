@@ -269,4 +269,73 @@ final class TKPayNapsTests: XCTestCase {
         XCTAssertTrue(text.contains("TKPAY"))
         XCTAssertTrue(text.contains("Amount: 100.00"))
     }
+
+    // MARK: - v5.4.4 Sync Tests
+
+    func testPaymentRequestCarriesDateTimeInBothTagPairs() {
+        let fields = TLVProtocol.parse(
+            TLVProtocol.buildPaymentRequest(amount: 150.0, ncai: "0100001", sequence: "000001"))
+
+        XCTAssertEqual(fields[TLVProtocol.Tags.TM], TLVProtocol.MessageTypes.paymentRequest)
+        XCTAssertEqual(fields[TLVProtocol.Tags.MT], "15000")
+        XCTAssertEqual(fields[TLVProtocol.Tags.DE], TLVProtocol.Currency.MAD)
+        XCTAssertEqual(fields[TLVProtocol.Tags.DA]?.count, 8)
+        XCTAssertEqual(fields[TLVProtocol.Tags.HE]?.count, 6)
+        XCTAssertEqual(fields[TLVProtocol.Tags.DATR], fields[TLVProtocol.Tags.DA])
+        XCTAssertEqual(fields[TLVProtocol.Tags.HETR], fields[TLVProtocol.Tags.HE])
+    }
+
+    func testManagementRequests() {
+        let cases: [(String, String)] = [
+            (TLVProtocol.buildNetworkTestRequest(ncai: "0200002", sequence: "000042"), "009"),
+            (TLVProtocol.buildTotalsRequest(ncai: "0200002", sequence: "000042"), "010"),
+            (TLVProtocol.buildDuplicateReceiptRequest(ncai: "0200002", sequence: "000042"), "008"),
+            (TLVProtocol.buildResetPinPadRequest(ncai: "0200002", sequence: "000042"), "012"),
+            (TLVProtocol.buildReferencingRequest(ncai: "0200002", sequence: "000042"), "013"),
+        ]
+        for (msg, tm) in cases {
+            let fields = TLVProtocol.parse(msg)
+            XCTAssertEqual(fields[TLVProtocol.Tags.TM], tm)
+            XCTAssertEqual(fields[TLVProtocol.Tags.NCAI], "0200002")
+            XCTAssertEqual(fields[TLVProtocol.Tags.NS], "000042")
+            XCTAssertNotNil(fields[TLVProtocol.Tags.DA])
+            XCTAssertNotNil(fields[TLVProtocol.Tags.HE])
+            XCTAssertNil(fields[TLVProtocol.Tags.MT])
+        }
+        XCTAssertTrue(TLVProtocol.buildManagementRequest(tm: "009").hasPrefix("001003009003007010000100400600000"))
+    }
+
+    func testReferencingCarriesTide() {
+        XCTAssertEqual(TLVProtocol.parse(TLVProtocol.buildReferencingRequest())[TLVProtocol.Tags.TIDE], "01")
+        let recharge = TLVProtocol.buildReferencingRequest(tide: TLVProtocol.Tide.recharge)
+        XCTAssertEqual(TLVProtocol.parse(recharge)[TLVProtocol.Tags.TIDE], "02")
+    }
+
+    private func receiptLine(_ num: String, _ content: String, align: String = "G", style: String = "S") -> String {
+        return "030002\(num)031001\(style)032001\(align)033" + String(format: "%03d", content.count) + content
+    }
+
+    func testParseReceiptSplitsOnEntrySeparator() {
+        let dp = [
+            receiptLine("00", "Naps", align: "C", style: "G"),
+            receiptLine("10", "5167940300023315"),   // PAN containing "030002"
+            receiptLine("24", "Copie Client"),
+        ].joined(separator: "*")
+
+        let receipt = TLVProtocol.parseReceipt(dp, type: .customer)
+        let texts = receipt.lines.map { $0.text }
+
+        XCTAssertEqual(texts, ["TKPAY", "516794******3315", "Copie Client", "Powered by NAPS"])
+        XCTAssertTrue(receipt.lines[0].bold)
+        XCTAssertEqual(receipt.lines[0].alignment, .center)
+        XCTAssertEqual(receipt.lines.last?.lineNumber, "25")
+        XCTAssertEqual(receipt.lines.last?.alignment, .center)
+    }
+
+    func testTerminatorDetection() {
+        XCTAssertTrue(NapsConnection.endsWithTerminator(Data("001003101!".utf8)))
+        XCTAssertTrue(NapsConnection.endsWithTerminator(Data("001003101?".utf8)))
+        XCTAssertFalse(NapsConnection.endsWithTerminator(Data("001003101".utf8)))
+        XCTAssertFalse(NapsConnection.endsWithTerminator(Data()))
+    }
 }
