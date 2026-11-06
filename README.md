@@ -93,7 +93,7 @@ if result.isApproved {
 Run it against the emulator (see [Testing with the emulator](#testing-with-the-emulator)):
 
 ```bash
-python3 /Users/belkouche/Projects/tkpay/tkpay-naps-emulator/naps_emulator.py --port 4444 &
+python3 ../tkpay-naps-emulator/naps_emulator.py --port 4444 &
 cd Example/Quickstart && swift run
 ```
 
@@ -421,7 +421,7 @@ The [NAPS emulator](https://github.com/Belkouche/tkpay-naps-emulator) is a Pytho
 without hardware:
 
 ```bash
-python3 /Users/belkouche/Projects/tkpay/tkpay-naps-emulator/naps_emulator.py --port 4444
+python3 ../tkpay-naps-emulator/naps_emulator.py --port 4444
 ```
 
 Point the SDK at `127.0.0.1:4444`. Useful `--mode` values:
@@ -442,7 +442,7 @@ Point the SDK at `127.0.0.1:4444`. Useful `--mode` values:
 
 Other flags: `--protocol v1` ends replies with `?`, `--strict-confirm` refuses a
 confirmation whose amount or PAN does not match the payment, and `--debug` prints every
-field. The `void_*` modes need emulator commit `5cc8536` or later.
+field.
 
 **This repo's tests:**
 
@@ -456,7 +456,7 @@ emulator mode. Set `NAPS_EMULATOR_MODE` (and `NAPS_EMULATOR_CODE` for modes that
 `--code`) to match how you started the emulator:
 
 ```bash
-python3 /Users/belkouche/Projects/tkpay/tkpay-naps-emulator/naps_emulator.py --port 4455 --mode void_refuse --code 482 &
+python3 ../tkpay-naps-emulator/naps_emulator.py --port 4455 --mode void_refuse --code 482 &
 NAPS_EMULATOR_PORT=4455 NAPS_EMULATOR_MODE=void_refuse NAPS_EMULATOR_CODE=482 swift test
 ```
 
