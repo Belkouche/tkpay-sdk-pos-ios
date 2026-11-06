@@ -70,7 +70,8 @@ v5.4.4 terminal test (tkpay-sdk-pos-naps-rn 5fcfeb0).
   per-phase receipts, confirmation echo, two-phase void) and emulator integration
   tests (`NAPS_EMULATOR_PORT=<port> [NAPS_EMULATOR_MODE=<mode> NAPS_EMULATOR_CODE=<rc>]
   swift test`) covering approve, strict-confirm, v1, decline, error, confirm_error,
-  no_confirm and timeout modes.
+  no_confirm, timeout and the void modes void_480, void_995, void_no_confirm and
+  void_refuse (emulator 5cc8536: unterminated TM 103/104, TM 004 NS and amount checks).
 
 ## [1.2.0] - 2026-09-12
 

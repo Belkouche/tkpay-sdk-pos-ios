@@ -111,6 +111,50 @@ final class EmulatorIntegrationTests: XCTestCase {
         XCTAssertTrue(result.customerReceipt?.toPlainText().contains("Copie Client") ?? false)
     }
 
+    // MARK: - Void modes (TM 103/104 arrive without a terminator)
+
+    private func void(confirmationTimeout: TimeInterval = 10) async -> CancellationResult {
+        let client = NapsPayClient(config: NapsConfig(
+            host: "127.0.0.1", port: port, timeout: 10, confirmationTimeout: confirmationTimeout))
+        return await client.cancelPayment(
+            stan: "123456", registerId: "01", cashierId: "00001", sequence: "000321", amountCentimes: 15000)
+    }
+
+    func testVoid480Mode() async throws {
+        try requireMode("void_480")
+        let result = await void()
+        XCTAssertTrue(result.success, result.error ?? "")
+        XCTAssertFalse(result.pending)
+        XCTAssertEqual(result.responseCode, "480")
+    }
+
+    func testVoid995ModeIsPending() async throws {
+        try requireMode("void_995")
+        let result = await void()
+        XCTAssertFalse(result.success)
+        XCTAssertTrue(result.pending)
+        XCTAssertEqual(result.responseCode, "995")
+        XCTAssertEqual(result.stan, "123456")   // TM 103 STAN kept for a TM 008 check
+        XCTAssertTrue(result.merchantReceipt?.toPlainText().contains("Copie Commercant") ?? false)
+    }
+
+    func testVoidNoConfirmModeIsPending() async throws {
+        try requireMode("void_no_confirm")
+        let result = await void(confirmationTimeout: 2)
+        XCTAssertFalse(result.success)
+        XCTAssertTrue(result.pending)
+        XCTAssertEqual(result.stan, "123456")
+        XCTAssertTrue(result.merchantReceipt?.toPlainText().contains("Copie Commercant") ?? false)
+    }
+
+    func testVoidRefuseModeFails() async throws {
+        try requireMode("void_refuse")
+        let result = await void()
+        XCTAssertFalse(result.success)
+        XCTAssertFalse(result.pending)
+        XCTAssertEqual(result.responseCode, code)
+    }
+
     // MARK: - Decline / error modes
 
     func testDeclineMode() async throws {
