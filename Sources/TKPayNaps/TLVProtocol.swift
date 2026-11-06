@@ -427,7 +427,7 @@ public enum TLVProtocol {
             let lengthStr = String(tlvString[tagEnd..<lengthEnd])
 
             // Validate length is numeric
-            guard let length = Int(lengthStr) else { break }
+            guard let length = tlvLength(lengthStr) else { break }
 
             // Check if we have enough data for the value
             guard tlvString.distance(from: lengthEnd, to: tlvString.endIndex) >= length else { break }
@@ -471,7 +471,7 @@ public enum TLVProtocol {
                 let tag = String(entry[index..<tagEnd])
 
                 let lengthEnd = entry.index(tagEnd, offsetBy: 3)
-                guard let length = Int(entry[tagEnd..<lengthEnd]) else { break }
+                guard let length = tlvLength(entry[tagEnd..<lengthEnd]) else { break }
                 guard entry.distance(from: lengthEnd, to: entry.endIndex) >= length else { break }
 
                 let valueEnd = entry.index(lengthEnd, offsetBy: length)
@@ -545,6 +545,13 @@ public enum TLVProtocol {
     }
 
     // MARK: - Private Helpers
+
+    /// TLV length field: exactly three ASCII digits. Rejects signs ("-01", "+01")
+    /// and non-ASCII digits that `Int(_:)` would otherwise accept.
+    static func tlvLength<S: StringProtocol>(_ field: S) -> Int? {
+        guard field.count == 3, field.allSatisfy({ $0.isASCII && $0.isNumber }) else { return nil }
+        return Int(field)
+    }
 
     private static func getCurrentDateTime() -> (date: String, time: String) {
         let formatter = DateFormatter()

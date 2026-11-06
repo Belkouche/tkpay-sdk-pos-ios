@@ -12,6 +12,8 @@ public class NapsConnection {
     private let config: NapsConfig
     private var connection: NWConnection?
     private let queue = DispatchQueue(label: "ma.tkpay.naps.connection")
+    /// Upper bound on a single response (DP receipts are at most 3500 chars)
+    static let maxResponseBytes = 64 * 1024
     // Receive state — only touched on `queue`
     private var receiveOutstanding = false
     private var chunkHandler: ((Data?, Bool, NWError?) -> Void)?
@@ -120,7 +122,7 @@ public class NapsConnection {
             guard body.distance(from: index, to: body.endIndex) >= 6 else { return false }
             let lengthStart = body.index(index, offsetBy: 3)
             let lengthEnd = body.index(lengthStart, offsetBy: 3)
-            guard let length = Int(body[lengthStart..<lengthEnd]),
+            guard let length = TLVProtocol.tlvLength(body[lengthStart..<lengthEnd]),
                   body.distance(from: lengthEnd, to: body.endIndex) >= length else { return false }
             index = body.index(lengthEnd, offsetBy: length)
         }
@@ -214,6 +216,11 @@ public class NapsConnection {
 
                 if let data = content {
                     receivedData.append(data)
+                }
+
+                if receivedData.count > NapsConnection.maxResponseBytes {
+                    finish(.failure(NapsError.invalidResponse("Response exceeds \(NapsConnection.maxResponseBytes) bytes")))
+                    return
                 }
 
                 if isComplete || content == nil || NapsConnection.endsWithTerminator(receivedData) {

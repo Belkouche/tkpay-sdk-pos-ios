@@ -332,6 +332,18 @@ final class TKPayNapsTests: XCTestCase {
         XCTAssertEqual(receipt.lines.last?.alignment, .center)
     }
 
+    func testNegativeOrSignedLengthIsRejected() {
+        // Int("-01") == -1 would move the cursor backwards (hang / crash)
+        XCTAssertNil(TLVProtocol.tlvLength("-01"))
+        XCTAssertNil(TLVProtocol.tlvLength("+01"))
+        XCTAssertNil(TLVProtocol.tlvLength("1a3"))
+        XCTAssertEqual(TLVProtocol.tlvLength("012"), 12)
+
+        XCTAssertFalse(NapsConnection.endsWithTerminator(Data("001-01X!".utf8)))
+        XCTAssertEqual(TLVProtocol.parse("001003101013-01X!"), ["001": "101"])
+        XCTAssertEqual(TLVProtocol.parseReceipt("030-01X", type: .merchant).lines.map { $0.text }, ["Powered by NAPS"])
+    }
+
     func testTerminatorDetection() {
         XCTAssertTrue(NapsConnection.endsWithTerminator(Data("001003101!".utf8)))
         XCTAssertTrue(NapsConnection.endsWithTerminator(Data("001003101?".utf8)))

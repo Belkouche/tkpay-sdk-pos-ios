@@ -22,6 +22,9 @@ Sync with NapsPay v5.4.4 / canonical C# SDK (TKPay.Naps 1.4.0).
 - **Phase-2 result.** The confirmation response must be TM=102 with CR=000; a rejected
   confirmation (e.g. CR=307 coherence failure) is now returned as a failed payment
   instead of an approval.
+- **TLV length hardening.** Length fields must be exactly three ASCII digits; a
+  signed length such as `-01` previously made the parser crash or the framer loop.
+  Responses larger than 64 KB are rejected.
 - **PAN masking.** `ReferencingResult.receiptText` and `TotalsResult.receiptText`
   mask card numbers like every other receipt path.
 
