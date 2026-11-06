@@ -193,16 +193,20 @@ public struct SettlementResult {
 
 // MARK: - Cancellation Result
 
-/// Cancellation result for TM=003 (void)
+/// Cancellation result for a void (TM=003 → 103, then TM=004 → 104)
 public struct CancellationResult {
     /// Whether cancellation was accepted (MT=103 or 104, RC=000)
     public let success: Bool
     /// Response code (000 = success)
     public let responseCode: String
-    /// STAN echoed by the terminal
+    /// STAN echoed by the terminal (the void's STAN from TM=104 when available)
     public let stan: String?
     /// Error message if cancellation failed
     public let error: String?
+    /// Merchant copy of the void receipt (DP of TM=103)
+    public var merchantReceipt: Receipt? = nil
+    /// Customer copy of the void receipt (DP of TM=104)
+    public var customerReceipt: Receipt? = nil
 }
 
 // MARK: - Management Results

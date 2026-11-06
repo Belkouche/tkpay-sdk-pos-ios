@@ -179,7 +179,9 @@ public class NapsPayClient {
     /// Flow on a single TCP connection:
     ///   1. Send TM=003 → terminal replies MT=103 (CR=000 = accepted)
     ///   2. Send TM=004 echoing the amount from MT=103 → terminal replies
-    ///      MT=104 with the final result (CR=000/995 = success)
+    ///      MT=104 with the void STAN and customer receipt (CR=000/995 = success).
+    ///      The void is committed at MT=103, so a missing MT=104 reply (timeout)
+    ///      is not a failure.
     ///
     /// - Parameters:
     ///   - stan: STAN of the transaction to cancel
@@ -209,13 +211,14 @@ public class NapsPayClient {
             let mt = fields[TLVProtocol.Tags.TM] ?? ""
 
             // MT=104 direct means already finalised (single-phase firmware)
-            if mt == TLVProtocol.MessageTypes.cancellationCorrection {
+            if mt == TLVProtocol.MessageTypes.cancellationConfirmationResponse {
                 connection.disconnect()
                 return CancellationResult(
                     success: responseCode == "000",
                     responseCode: responseCode,
                     stan: fields[TLVProtocol.Tags.STAN],
-                    error: responseCode == "000" ? nil : "Cancellation failed with code: \(responseCode)"
+                    error: responseCode == "000" ? nil : "Cancellation failed with code: \(responseCode)",
+                    customerReceipt: fields[TLVProtocol.Tags.DP].map { TLVProtocol.parseReceipt($0, type: .customer) }
                 )
             }
 
@@ -236,7 +239,22 @@ public class NapsPayClient {
                 sequence: sequence,
                 amount: fields[TLVProtocol.Tags.MT]
             )
-            let confirmResponse = try await connection.sendAndReceive(confirmRequest, timeout: config.confirmationTimeout)
+            let merchantReceipt = fields[TLVProtocol.Tags.DP].map { TLVProtocol.parseReceipt($0, type: .merchant) }
+            let confirmResponse: String
+            do {
+                confirmResponse = try await connection.sendAndReceive(confirmRequest, timeout: config.confirmationTimeout)
+            } catch let error as NapsError where error.code == .timeout {
+                // The void is committed once MT=103 returns CR=000; MT=104 only carries
+                // the void STAN and customer copy, so a missing reply is not a failure.
+                connection.disconnect()
+                return CancellationResult(
+                    success: true,
+                    responseCode: responseCode,
+                    stan: fields[TLVProtocol.Tags.STAN],
+                    error: nil,
+                    merchantReceipt: merchantReceipt
+                )
+            }
             connection.disconnect()
 
             let fields2 = TLVProtocol.parse(confirmResponse)
@@ -248,7 +266,9 @@ public class NapsPayClient {
                 success: success2,
                 responseCode: cr2,
                 stan: fields2[TLVProtocol.Tags.STAN] ?? fields[TLVProtocol.Tags.STAN],
-                error: success2 ? nil : "Cancellation failed with code: \(cr2)"
+                error: success2 ? nil : "Cancellation failed with code: \(cr2)",
+                merchantReceipt: merchantReceipt,
+                customerReceipt: fields2[TLVProtocol.Tags.DP].map { TLVProtocol.parseReceipt($0, type: .customer) }
             )
         } catch {
             connection.disconnect()

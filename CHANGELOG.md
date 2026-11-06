@@ -38,6 +38,16 @@ Sync with NapsPay v5.4.4 / canonical C# SDK (TKPay.Naps 1.4.0).
 - Receipt branding matches the reference SDK: centred "Naps" lines become "TKPAY"
   and "Powered by NAPS" is appended as the last line.
 
+### Changed — void (TM 003 → 103, TM 004 → 104), aligned with TKPay.Naps 1.5.0
+- TM 004 carries the same fields as TM 003: the sequence is now sent in NSA (005)
+  instead of NS (004).
+- `CancellationResult` gains `merchantReceipt` (DP of TM 103) and `customerReceipt`
+  (DP of TM 104); `stan` prefers the void STAN from TM 104.
+- A missing TM 104 reply (confirmation timeout) after an accepted TM 103 is reported
+  as a successful void — the void is committed at TM 103.
+- `MessageTypes.cancellationConfirmationResponse` ("104") added;
+  `cancellationCorrection` is deprecated (104 is the reply to TM 004).
+
 ### Added — management operations on `NapsPayClient`
 - `networkTest()` (TM=009) → `NetworkTestResult`
 - `referencing(tide:)` (TM=013, TIDE 020: `"01"` merchant, `"02"` recharge) → `ReferencingResult`
@@ -49,8 +59,10 @@ Sync with NapsPay v5.4.4 / canonical C# SDK (TKPay.Naps 1.4.0).
 
 ### Tests
 - In-process fake-terminal tests (terminator handling, silence fallback, decline,
-  per-phase receipts, confirmation echo) and emulator integration tests
-  (`NAPS_EMULATOR_PORT=<port> swift test`).
+  per-phase receipts, confirmation echo, two-phase void) and emulator integration
+  tests (`NAPS_EMULATOR_PORT=<port> [NAPS_EMULATOR_MODE=<mode> NAPS_EMULATOR_CODE=<rc>]
+  swift test`) covering approve, strict-confirm, v1, decline, error, confirm_error,
+  no_confirm and timeout modes.
 
 ## [1.2.0] - 2026-09-12
 

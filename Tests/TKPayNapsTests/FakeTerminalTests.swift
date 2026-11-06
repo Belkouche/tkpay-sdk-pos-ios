@@ -182,6 +182,44 @@ final class FakeTerminalTests: XCTestCase {
         }
     }
 
+    func testVoidTwoPhaseCarriesReceiptsAndVoidStan() async throws {
+        let r103 = f("001", "103") + f("013", "000") + f("002", "15000") + f("008", "111111")
+            + f("010", dp("ANNULATION Copie Commercant")) + "!"
+        let r104 = f("001", "104") + f("013", "000") + f("008", "222222")
+            + f("010", dp("ANNULATION Copie Client")) + "!"
+        try await withTerminal([[r103], [r104]]) { port, terminal in
+            let client = NapsPayClient(config: NapsConfig(host: "127.0.0.1", port: port, timeout: 10))
+            let result = await client.cancelPayment(
+                stan: "111111", registerId: "01", cashierId: "00001", sequence: "000321", amountCentimes: 15000)
+
+            XCTAssertTrue(result.success, result.error ?? "")
+            XCTAssertEqual(result.stan, "222222")   // void STAN from TM=104
+            XCTAssertTrue(result.merchantReceipt?.toPlainText().contains("Copie Commercant") ?? false)
+            XCTAssertTrue(result.customerReceipt?.toPlainText().contains("Copie Client") ?? false)
+
+            XCTAssertEqual(terminal.requests.count, 2)
+            let confirm = TLVProtocol.parse(terminal.requests[1])
+            XCTAssertEqual(confirm[TLVProtocol.Tags.TM], "004")
+            XCTAssertEqual(confirm[TLVProtocol.Tags.MT], "15000")
+            XCTAssertEqual(confirm[TLVProtocol.Tags.NSA], "000321")
+        }
+    }
+
+    func testVoidSucceedsWhenTM104NeverArrives() async throws {
+        let r103 = f("001", "103") + f("013", "000") + f("008", "111111") + f("010", dp("ANNULATION")) + "!"
+        try await withTerminal([[r103]]) { port, _ in
+            let client = NapsPayClient(config: NapsConfig(
+                host: "127.0.0.1", port: port, timeout: 10, confirmationTimeout: 1))
+            let result = await client.cancelPayment(
+                stan: "111111", registerId: "01", cashierId: "00001", sequence: "000321", amountCentimes: 15000)
+
+            XCTAssertTrue(result.success, result.error ?? "")
+            XCTAssertEqual(result.stan, "111111")
+            XCTAssertNotNil(result.merchantReceipt)
+            XCTAssertNil(result.customerReceipt)
+        }
+    }
+
     func testRejectsInvalidSequenceLength() async {
         let client = NapsPayClient(config: NapsConfig(host: "127.0.0.1", port: 1))
         do {

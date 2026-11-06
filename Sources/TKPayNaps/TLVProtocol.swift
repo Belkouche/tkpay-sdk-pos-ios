@@ -58,6 +58,8 @@ public enum TLVProtocol {
         public static let cancellationRequest = "003"
         public static let cancellationResponse = "103"
         public static let cancellationConfirmationRequest = "004"
+        public static let cancellationConfirmationResponse = "104"
+        @available(*, deprecated, renamed: "cancellationConfirmationResponse")
         public static let cancellationCorrection = "104"
         public static let settlementRequest = "010"
         public static let settlementResponse = "110"
@@ -306,7 +308,8 @@ public enum TLVProtocol {
 
     /// Build cancellation confirmation request TLV (TM=004)
     ///
-    /// Sent on the same connection after receiving MT=103 from TM=003.
+    /// Sent on the same connection after receiving MT=103 from TM=003; carries the
+    /// same fields as the TM=003 request (sequence in NSA/005, as the reference SDK).
     /// `amount` must echo the amount (TAG 002, 12-digit) from the MT=103
     /// response — omitting it is refused with CR=909 on NapsPay v5.4.4+.
     public static func buildCancellationConfirmation(
@@ -322,7 +325,7 @@ public enum TLVProtocol {
         }
         msg += buildField(tag: Tags.STAN, value: stan)
             + buildField(tag: Tags.NCAI, value: ncai)
-            + buildField(tag: Tags.NS, value: sequence)
+            + buildField(tag: Tags.NSA, value: sequence)
             + buildField(tag: Tags.DA, value: dateTime.date)
             + buildField(tag: Tags.HE, value: dateTime.time)
         return msg

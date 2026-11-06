@@ -332,6 +332,17 @@ final class TKPayNapsTests: XCTestCase {
         XCTAssertEqual(receipt.lines.last?.alignment, .center)
     }
 
+    func testCancellationConfirmationCarriesTM003Fields() {
+        let fields = TLVProtocol.parse(TLVProtocol.buildCancellationConfirmation(
+            stan: "123456", ncai: "0100001", sequence: "000321", amount: "15000"))
+
+        XCTAssertEqual(fields[TLVProtocol.Tags.TM], TLVProtocol.MessageTypes.cancellationConfirmationRequest)
+        XCTAssertEqual(fields[TLVProtocol.Tags.MT], "15000")
+        XCTAssertEqual(fields[TLVProtocol.Tags.STAN], "123456")
+        XCTAssertEqual(fields[TLVProtocol.Tags.NSA], "000321")
+        XCTAssertNil(fields[TLVProtocol.Tags.NS])
+    }
+
     func testNegativeOrSignedLengthIsRejected() {
         // Int("-01") == -1 would move the cursor backwards (hang / crash)
         XCTAssertNil(TLVProtocol.tlvLength("-01"))
