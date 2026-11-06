@@ -201,11 +201,13 @@ final class FakeTerminalTests: XCTestCase {
             let confirm = TLVProtocol.parse(terminal.requests[1])
             XCTAssertEqual(confirm[TLVProtocol.Tags.TM], "004")
             XCTAssertEqual(confirm[TLVProtocol.Tags.MT], "15000")
-            XCTAssertEqual(confirm[TLVProtocol.Tags.NSA], "000321")
+            XCTAssertEqual(confirm[TLVProtocol.Tags.NS], "000321")   // same sequence as TM=003
+            XCTAssertNil(confirm[TLVProtocol.Tags.NSA])
+            XCTAssertFalse(result.pending)
         }
     }
 
-    func testVoidSucceedsWhenTM104NeverArrives() async throws {
+    func testVoidIsPendingWhenTM104NeverArrives() async throws {
         let r103 = f("001", "103") + f("013", "000") + f("008", "111111") + f("010", dp("ANNULATION")) + "!"
         try await withTerminal([[r103]]) { port, _ in
             let client = NapsPayClient(config: NapsConfig(
@@ -213,11 +215,52 @@ final class FakeTerminalTests: XCTestCase {
             let result = await client.cancelPayment(
                 stan: "111111", registerId: "01", cashierId: "00001", sequence: "000321", amountCentimes: 15000)
 
-            XCTAssertTrue(result.success, result.error ?? "")
-            XCTAssertEqual(result.stan, "111111")
+            XCTAssertFalse(result.success)
+            XCTAssertTrue(result.pending)
+            XCTAssertEqual(result.responseCode, "")
+            XCTAssertEqual(result.stan, "111111")   // original STAN, for a TM=008 check
             XCTAssertNotNil(result.merchantReceipt)
             XCTAssertNil(result.customerReceipt)
+            XCTAssertNotNil(result.error)
         }
+    }
+
+    private func void(tm104 cr: String) async throws -> CancellationResult {
+        let r103 = f("001", "103") + f("013", "000") + f("002", "15000") + f("008", "111111")
+            + f("010", dp("ANNULATION Copie Commercant")) + "!"
+        let r104 = f("001", "104") + f("013", cr) + f("008", "222222") + "!"
+        var result: CancellationResult?
+        try await withTerminal([[r103], [r104]]) { port, _ in
+            let client = NapsPayClient(config: NapsConfig(host: "127.0.0.1", port: port, timeout: 10))
+            result = await client.cancelPayment(
+                stan: "111111", registerId: "01", cashierId: "00001", sequence: "000321", amountCentimes: 15000)
+        }
+        return try XCTUnwrap(result)
+    }
+
+    func testVoidTM104Code480IsSuccess() async throws {
+        let result = try await void(tm104: "480")
+        XCTAssertTrue(result.success, result.error ?? "")
+        XCTAssertFalse(result.pending)
+        XCTAssertEqual(result.responseCode, "480")
+        XCTAssertEqual(result.stan, "222222")
+    }
+
+    func testVoidTM104Code995IsPending() async throws {
+        let result = try await void(tm104: "995")
+        XCTAssertFalse(result.success)
+        XCTAssertTrue(result.pending)
+        XCTAssertEqual(result.responseCode, "995")
+        XCTAssertEqual(result.stan, "111111")   // original STAN, for a TM=008 check
+        XCTAssertNotNil(result.merchantReceipt)
+    }
+
+    func testVoidTM104OtherCodeIsFailure() async throws {
+        let result = try await void(tm104: "482")
+        XCTAssertFalse(result.success)
+        XCTAssertFalse(result.pending)
+        XCTAssertEqual(result.responseCode, "482")
+        XCTAssertEqual(result.error, "Cancellation failed with code: 482")
     }
 
     func testRejectsInvalidSequenceLength() async {

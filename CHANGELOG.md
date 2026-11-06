@@ -38,13 +38,21 @@ Sync with NapsPay v5.4.4 / canonical C# SDK (TKPay.Naps 1.4.0).
 - Receipt branding matches the reference SDK: centred "Naps" lines become "TKPAY"
   and "Powered by NAPS" is appended as the last line.
 
-### Changed — void (TM 003 → 103, TM 004 → 104), aligned with TKPay.Naps 1.5.0
-- TM 004 carries the same fields as TM 003: the sequence is now sent in NSA (005)
-  instead of NS (004).
+### Changed — void (TM 003 → 103, TM 004 → 104), per spec v2.0 §4.3–4.4
+Checked against the NapsPay ECR TLV Protocol Specification v2.0 and the live
+v5.4.4 terminal test (tkpay-sdk-pos-naps-rn 5fcfeb0).
+- TM 004 sends the sequence in NS (004), the same value as the TM 003 it confirms,
+  and echoes the amount (002) from TM 103. TM 003 is unchanged.
+- TM 104 CR=000 or 480 = void completed. CR=995 and a missing TM 104 reply
+  (confirmation timeout) **fail closed**: `success == false`, the new
+  `CancellationResult.pending == true`, and `stan` is the original transaction's
+  STAN (from TM 103), with the TM 103 merchant receipt attached. TM 103 CR=000 only
+  means "transaction found"; TM 004 performs the reversal. Any other code = failure.
+  The same rules apply when firmware answers TM 003 with TM 104 directly.
+- `duplicateReceipt(stan:)` / `buildDuplicateReceiptRequest(stan:)` (optional, spec
+  §4.6) reprint a specific transaction, so a pending void can be checked by STAN.
 - `CancellationResult` gains `merchantReceipt` (DP of TM 103) and `customerReceipt`
-  (DP of TM 104); `stan` prefers the void STAN from TM 104.
-- A missing TM 104 reply (confirmation timeout) after an accepted TM 103 is reported
-  as a successful void — the void is committed at TM 103.
+  (DP of TM 104); on success `stan` is the void STAN from TM 104.
 - `MessageTypes.cancellationConfirmationResponse` ("104") added;
   `cancellationCorrection` is deprecated (104 is the reply to TM 004).
 

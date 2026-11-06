@@ -195,7 +195,7 @@ public struct SettlementResult {
 
 /// Cancellation result for a void (TM=003 → 103, then TM=004 → 104)
 public struct CancellationResult {
-    /// Whether cancellation was accepted (MT=103 or 104, RC=000)
+    /// Whether the void completed (TM=104 with CR=000 or 480)
     public let success: Bool
     /// Response code (000 = success)
     public let responseCode: String
@@ -207,6 +207,9 @@ public struct CancellationResult {
     public var merchantReceipt: Receipt? = nil
     /// Customer copy of the void receipt (DP of TM=104)
     public var customerReceipt: Receipt? = nil
+    /// Void outcome unknown (no TM=104 reply, or CR=995): `success` is false; verify
+    /// with `duplicateReceipt` using `stan` (the original transaction's STAN)
+    public var pending: Bool = false
 }
 
 // MARK: - Management Results

@@ -178,10 +178,11 @@ public class NapsPayClient {
     /// NapsPay v5.4.4+ requires the original amount (TAG 002) in the TM=003 frame.
     /// Flow on a single TCP connection:
     ///   1. Send TM=003 → terminal replies MT=103 (CR=000 = accepted)
-    ///   2. Send TM=004 echoing the amount from MT=103 → terminal replies
-    ///      MT=104 with the void STAN and customer receipt (CR=000/995 = success).
-    ///      The void is committed at MT=103, so a missing MT=104 reply (timeout)
-    ///      is not a failure.
+    ///   2. Send TM=004 echoing the amount from MT=103 → terminal executes the
+    ///      reversal and replies MT=104 (CR=000/480 = completed).
+    ///      TM=103 CR=000 only means "transaction found", so a missing MT=104 reply
+    ///      or CR=995 is returned as `pending` (not success): verify the void with
+    ///      `duplicateReceipt` using the returned STAN.
     ///
     /// - Parameters:
     ///   - stan: STAN of the transaction to cancel
@@ -213,13 +214,8 @@ public class NapsPayClient {
             // MT=104 direct means already finalised (single-phase firmware)
             if mt == TLVProtocol.MessageTypes.cancellationConfirmationResponse {
                 connection.disconnect()
-                return CancellationResult(
-                    success: responseCode == "000",
-                    responseCode: responseCode,
-                    stan: fields[TLVProtocol.Tags.STAN],
-                    error: responseCode == "000" ? nil : "Cancellation failed with code: \(responseCode)",
-                    customerReceipt: fields[TLVProtocol.Tags.DP].map { TLVProtocol.parseReceipt($0, type: .customer) }
-                )
+                return cancellationOutcome(fields, originalStan: fields[TLVProtocol.Tags.STAN] ?? stan,
+                                           merchantReceipt: nil)
             }
 
             guard mt == TLVProtocol.MessageTypes.cancellationResponse, responseCode == "000" else {
@@ -244,37 +240,52 @@ public class NapsPayClient {
             do {
                 confirmResponse = try await connection.sendAndReceive(confirmRequest, timeout: config.confirmationTimeout)
             } catch let error as NapsError where error.code == .timeout {
-                // The void is committed once MT=103 returns CR=000; MT=104 only carries
-                // the void STAN and customer copy, so a missing reply is not a failure.
+                // TM=103 CR=000 only means "found"; TM=004 executes the reversal, so
+                // without TM=104 the outcome is unknown — fail closed.
                 connection.disconnect()
                 return CancellationResult(
-                    success: true,
-                    responseCode: responseCode,
-                    stan: fields[TLVProtocol.Tags.STAN],
-                    error: nil,
-                    merchantReceipt: merchantReceipt
+                    success: false,
+                    responseCode: "",
+                    stan: fields[TLVProtocol.Tags.STAN] ?? stan,
+                    error: "Void unconfirmed: no TM=104 reply — verify with duplicate receipt",
+                    merchantReceipt: merchantReceipt,
+                    pending: true
                 )
             }
             connection.disconnect()
 
-            let fields2 = TLVProtocol.parse(confirmResponse)
-            let cr2 = fields2[TLVProtocol.Tags.CR] ?? ""
-            // CR=000 = confirmed, CR=995 = host processing (also success)
-            let success2 = cr2 == "000" || cr2 == "995"
-
-            return CancellationResult(
-                success: success2,
-                responseCode: cr2,
-                stan: fields2[TLVProtocol.Tags.STAN] ?? fields[TLVProtocol.Tags.STAN],
-                error: success2 ? nil : "Cancellation failed with code: \(cr2)",
-                merchantReceipt: merchantReceipt,
-                customerReceipt: fields2[TLVProtocol.Tags.DP].map { TLVProtocol.parseReceipt($0, type: .customer) }
-            )
+            return cancellationOutcome(TLVProtocol.parse(confirmResponse),
+                                       originalStan: fields[TLVProtocol.Tags.STAN] ?? stan,
+                                       merchantReceipt: merchantReceipt)
         } catch {
             connection.disconnect()
             return CancellationResult(success: false, responseCode: "", stan: nil,
                                       error: error.localizedDescription)
         }
+    }
+
+    /// Map a TM=104 reply (spec §4.4): CR=000/480 = void completed; CR=995 (seen with
+    /// completed voids on live terminals) = pending, keeping the original STAN for a
+    /// duplicate-receipt check; anything else = failed.
+    private func cancellationOutcome(_ fields: [String: String], originalStan: String,
+                                     merchantReceipt: Receipt?) -> CancellationResult {
+        let cr = fields[TLVProtocol.Tags.CR] ?? ""
+        let customerReceipt = fields[TLVProtocol.Tags.DP].map { TLVProtocol.parseReceipt($0, type: .customer) }
+        if cr == "000" || cr == "480" {
+            return CancellationResult(success: true, responseCode: cr,
+                                      stan: fields[TLVProtocol.Tags.STAN] ?? originalStan, error: nil,
+                                      merchantReceipt: merchantReceipt, customerReceipt: customerReceipt)
+        }
+        if cr == "995" {
+            return CancellationResult(success: false, responseCode: cr, stan: originalStan,
+                                      error: "Void unconfirmed: code 995 — verify with duplicate receipt",
+                                      merchantReceipt: merchantReceipt, customerReceipt: customerReceipt,
+                                      pending: true)
+        }
+        return CancellationResult(success: false, responseCode: cr,
+                                  stan: fields[TLVProtocol.Tags.STAN] ?? originalStan,
+                                  error: "Cancellation failed with code: \(cr)",
+                                  merchantReceipt: merchantReceipt, customerReceipt: customerReceipt)
     }
 
     /// Network test / ping (TM=009). Verifies the terminal can reach the NAPS host.
@@ -316,10 +327,13 @@ public class NapsPayClient {
         return TotalsResult(success: rc == "000", responseCode: rc, receiptText: fields[TLVProtocol.Tags.DP].map(TLVProtocol.maskCardNumbersInText))
     }
 
-    /// Duplicate receipt / reprint (TM=008). Reprints the last transaction's receipt.
-    public func duplicateReceipt(registerId: String = "01", cashierId: String = "00001") async throws -> PaymentResult {
+    /// Duplicate receipt / reprint (TM=008). Reprints the receipt of `stan`, or of the
+    /// last transaction when omitted. Use it to verify a `pending` void.
+    public func duplicateReceipt(registerId: String = "01", cashierId: String = "00001",
+                                 stan: String? = nil) async throws -> PaymentResult {
         let fields = try await sendManagement(
-            TLVProtocol.buildDuplicateReceiptRequest(ncai: registerId + cashierId, sequence: generateSequence()))
+            TLVProtocol.buildDuplicateReceiptRequest(ncai: registerId + cashierId, sequence: generateSequence(),
+                                                     stan: stan))
         let rc = fields[TLVProtocol.Tags.CR] ?? ""
         guard rc == "000" else {
             return buildFailedResult(responseCode: rc, fields: fields)

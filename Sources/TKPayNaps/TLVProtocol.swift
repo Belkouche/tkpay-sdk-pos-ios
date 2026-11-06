@@ -308,9 +308,9 @@ public enum TLVProtocol {
 
     /// Build cancellation confirmation request TLV (TM=004)
     ///
-    /// Sent on the same connection after receiving MT=103 from TM=003; carries the
-    /// same fields as the TM=003 request (sequence in NSA/005, as the reference SDK).
-    /// `amount` must echo the amount (TAG 002, 12-digit) from the MT=103
+    /// Sent on the same connection after receiving MT=103 from TM=003. Per spec §4.4
+    /// the sequence goes in NS (004) with the same value as the TM=003 it confirms
+    /// (verified on a live v5.4.4 terminal). `amount` must echo the amount (TAG 002, 12-digit) from the MT=103
     /// response — omitting it is refused with CR=909 on NapsPay v5.4.4+.
     public static func buildCancellationConfirmation(
         stan: String,
@@ -325,7 +325,7 @@ public enum TLVProtocol {
         }
         msg += buildField(tag: Tags.STAN, value: stan)
             + buildField(tag: Tags.NCAI, value: ncai)
-            + buildField(tag: Tags.NSA, value: sequence)
+            + buildField(tag: Tags.NS, value: sequence)
             + buildField(tag: Tags.DA, value: dateTime.date)
             + buildField(tag: Tags.HE, value: dateTime.time)
         return msg
@@ -389,8 +389,11 @@ public enum TLVProtocol {
     }
 
     /// Build a duplicate-receipt (reprint) request (TM=008)
-    public static func buildDuplicateReceiptRequest(ncai: String = "0100001", sequence: String = "000001") -> String {
-        return buildManagementRequest(tm: MessageTypes.duplicateReceipt, ncai: ncai, sequence: sequence)
+    /// `stan` targets a specific transaction (spec §4.6); omitted = last transaction.
+    public static func buildDuplicateReceiptRequest(ncai: String = "0100001", sequence: String = "000001",
+                                                    stan: String? = nil) -> String {
+        return buildManagementRequest(tm: MessageTypes.duplicateReceipt, ncai: ncai, sequence: sequence,
+                                      extraFields: stan.map { [(tag: Tags.STAN, value: $0)] } ?? [])
     }
 
     /// Build a reset-PIN-pad request (TM=012)

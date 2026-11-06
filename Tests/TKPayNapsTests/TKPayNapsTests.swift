@@ -332,15 +332,23 @@ final class TKPayNapsTests: XCTestCase {
         XCTAssertEqual(receipt.lines.last?.alignment, .center)
     }
 
-    func testCancellationConfirmationCarriesTM003Fields() {
+    func testCancellationConfirmationCarriesSequenceInNS() {
         let fields = TLVProtocol.parse(TLVProtocol.buildCancellationConfirmation(
             stan: "123456", ncai: "0100001", sequence: "000321", amount: "15000"))
 
+        // Spec §4.4: TM=004 NS (004) = NS of the TM=003 it confirms; amount echoed from TM=103
         XCTAssertEqual(fields[TLVProtocol.Tags.TM], TLVProtocol.MessageTypes.cancellationConfirmationRequest)
         XCTAssertEqual(fields[TLVProtocol.Tags.MT], "15000")
         XCTAssertEqual(fields[TLVProtocol.Tags.STAN], "123456")
-        XCTAssertEqual(fields[TLVProtocol.Tags.NSA], "000321")
-        XCTAssertNil(fields[TLVProtocol.Tags.NS])
+        XCTAssertEqual(fields[TLVProtocol.Tags.NS], "000321")
+        XCTAssertNil(fields[TLVProtocol.Tags.NSA])
+    }
+
+    func testDuplicateReceiptRequestCanTargetStan() {
+        let targeted = TLVProtocol.parse(TLVProtocol.buildDuplicateReceiptRequest(stan: "111111"))
+        XCTAssertEqual(targeted[TLVProtocol.Tags.TM], TLVProtocol.MessageTypes.duplicateReceipt)
+        XCTAssertEqual(targeted[TLVProtocol.Tags.STAN], "111111")
+        XCTAssertNil(TLVProtocol.parse(TLVProtocol.buildDuplicateReceiptRequest())[TLVProtocol.Tags.STAN])
     }
 
     func testNegativeOrSignedLengthIsRejected() {
