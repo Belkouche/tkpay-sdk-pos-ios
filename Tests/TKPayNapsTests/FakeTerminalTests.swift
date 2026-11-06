@@ -144,6 +144,44 @@ final class FakeTerminalTests: XCTestCase {
         }
     }
 
+    func testReadDoesNotStopAtTerminatorInsideValue() async throws {
+        let reply = f("001", "110") + f("033", "Merci!") + f("013", "000")
+        let split = reply.range(of: "!")!.upperBound
+        try await withTerminal([[String(reply[..<split]), String(reply[split...]) + "!"]]) { port, _ in
+            let connection = NapsConnection(config: NapsConfig(host: "127.0.0.1", port: port, timeout: 10))
+            try await connection.connect()
+            defer { connection.disconnect() }
+
+            let response = try await connection.sendAndReceive("001003010", timeout: 10)
+            XCTAssertEqual(response, reply)
+        }
+    }
+
+    func testRejectedConfirmationIsNotApproved() async throws {
+        let phase1 = f("001", "101") + f("013", "000") + f("008", "654321") + "!"
+        let phase2 = f("001", "102") + f("013", "307") + f("008", "654321") + "!"
+        try await withTerminal([[phase1], [phase2]]) { port, _ in
+            let client = NapsPayClient(config: NapsConfig(host: "127.0.0.1", port: port, timeout: 10))
+            let result = try await client.processPayment(
+                PaymentRequest(amount: 10, registerId: "01", cashierId: "00001"))
+
+            XCTAssertFalse(result.isApproved)
+            XCTAssertEqual(result.responseCode, "307")
+            XCTAssertEqual(result.error, "Format error — code: 307")
+        }
+    }
+
+    func testTotalsReceiptTextIsPanMasked() async throws {
+        let reply = f("001", "110") + f("013", "000") + f("010", dp("Carte 5167940123453315")) + "!"
+        try await withTerminal([[reply]]) { port, _ in
+            let client = NapsPayClient(config: NapsConfig(host: "127.0.0.1", port: port, timeout: 10))
+            let result = try await client.totals()
+
+            XCTAssertTrue(result.receiptText?.contains("516794******3315") ?? false, result.receiptText ?? "")
+            XCTAssertFalse(result.receiptText?.contains("5167940123453315") ?? true)
+        }
+    }
+
     func testRejectsInvalidSequenceLength() async {
         let client = NapsPayClient(config: NapsConfig(host: "127.0.0.1", port: 1))
         do {

@@ -104,6 +104,22 @@ public class NapsPayClient {
 
             connection.disconnect()
 
+            // Phase 2 must be a confirmation response (TM=102) with CR=000; a rejected
+            // confirmation (e.g. CR=307 coherence failure) is not an approval.
+            if let tm = confirmResponse[TLVProtocol.Tags.TM], tm != TLVProtocol.MessageTypes.confirmationResponse {
+                throw NapsError.invalidResponse("Unexpected confirmation message type: \(tm)")
+            }
+            let confirmCode = confirmResponse[TLVProtocol.Tags.CR] ?? ""
+            if confirmCode != "000" {
+                let result = buildFailedResult(responseCode: confirmCode, fields: confirmResponse)
+                GatewayNotifier.notifyTransaction(
+                    terminalHost: config.host,
+                    request: request,
+                    result: result
+                )
+                return result
+            }
+
             // Build successful result — merchant copy from Phase 1, customer copy from Phase 2
             let result = buildSuccessResult(phase1Fields: paymentResponse, fields: confirmResponse)
 
@@ -268,7 +284,7 @@ public class NapsPayClient {
             success: rc == "000",
             responseCode: rc,
             parameterSet: tide,
-            receiptText: fields[TLVProtocol.Tags.DP]
+            receiptText: fields[TLVProtocol.Tags.DP].map(TLVProtocol.maskCardNumbersInText)
         )
     }
 
@@ -277,7 +293,7 @@ public class NapsPayClient {
         let fields = try await sendManagement(
             TLVProtocol.buildTotalsRequest(ncai: registerId + cashierId, sequence: generateSequence()))
         let rc = fields[TLVProtocol.Tags.CR] ?? ""
-        return TotalsResult(success: rc == "000", responseCode: rc, receiptText: fields[TLVProtocol.Tags.DP])
+        return TotalsResult(success: rc == "000", responseCode: rc, receiptText: fields[TLVProtocol.Tags.DP].map(TLVProtocol.maskCardNumbersInText))
     }
 
     /// Duplicate receipt / reprint (TM=008). Reprints the last transaction's receipt.

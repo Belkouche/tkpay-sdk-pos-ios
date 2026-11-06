@@ -337,5 +337,9 @@ final class TKPayNapsTests: XCTestCase {
         XCTAssertTrue(NapsConnection.endsWithTerminator(Data("001003101?".utf8)))
         XCTAssertFalse(NapsConnection.endsWithTerminator(Data("001003101".utf8)))
         XCTAssertFalse(NapsConnection.endsWithTerminator(Data()))
+        // '!' inside a value, or at the end of a partial chunk, is not end-of-message
+        XCTAssertFalse(NapsConnection.endsWithTerminator(Data("033010Merci!".utf8)))
+        XCTAssertTrue(NapsConnection.endsWithTerminator(Data("033006Merci!!".utf8)))
+        XCTAssertFalse(NapsConnection.endsWithTerminator(Data("033006Merci!013003000!".utf8).dropLast(4)))
     }
 }

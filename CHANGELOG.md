@@ -16,6 +16,14 @@ Sync with NapsPay v5.4.4 / canonical C# SDK (TKPay.Naps 1.4.0).
   a value such as a PAN can no longer be misread as sub-tags). The merchant copy
   comes from the Phase-1 response (TM=101) and the customer copy from Phase 2
   (TM=102); both were previously parsed from Phase 2.
+- **Framing.** A terminator only ends a read when it follows complete TLV units, so a
+  `!`/`?` inside a value or at the end of a partial chunk no longer truncates the
+  response. Late bytes from an earlier exchange are dropped, never prepended.
+- **Phase-2 result.** The confirmation response must be TM=102 with CR=000; a rejected
+  confirmation (e.g. CR=307 coherence failure) is now returned as a failed payment
+  instead of an approval.
+- **PAN masking.** `ReferencingResult.receiptText` and `TotalsResult.receiptText`
+  mask card numbers like every other receipt path.
 
 ### Changed
 - Payment request (TM=001) sends DA/HE alongside DATR/HETR, matching the reference SDK.

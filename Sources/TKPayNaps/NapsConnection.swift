@@ -14,7 +14,6 @@ public class NapsConnection {
     private let queue = DispatchQueue(label: "ma.tkpay.naps.connection")
     // Receive state — only touched on `queue`
     private var receiveOutstanding = false
-    private var leftover = Data()
     private var chunkHandler: ((Data?, Bool, NWError?) -> Void)?
 
     public init(config: NapsConfig) {
@@ -95,8 +94,8 @@ public class NapsConnection {
         }
 
         // Strip the trailing terminator ('!' v2, '?' v1) if present
-        if let term = responseString.lastIndex(where: { NapsConnection.isTerminator($0) }) {
-            responseString = String(responseString[..<term])
+        if let last = responseString.last, NapsConnection.isTerminator(last) {
+            responseString.removeLast()
         }
 
         return responseString
@@ -108,10 +107,24 @@ public class NapsConnection {
         return c == "!" || c == "?"
     }
 
-    /// Whether a received buffer ends with an end-of-message terminator.
+    /// Whether a received buffer is a complete frame: whole TLV units followed by a
+    /// single terminator as the last character. A '!' or '?' inside a value (or at the
+    /// end of a partial chunk) is not treated as end-of-message.
     static func endsWithTerminator(_ data: Data) -> Bool {
-        guard let last = data.last else { return false }
-        return last == UInt8(ascii: "!") || last == UInt8(ascii: "?")
+        guard let text = String(data: data, encoding: .utf8), let last = text.last, isTerminator(last) else {
+            return false
+        }
+        let body = text.dropLast()
+        var index = body.startIndex
+        while index < body.endIndex {
+            guard body.distance(from: index, to: body.endIndex) >= 6 else { return false }
+            let lengthStart = body.index(index, offsetBy: 3)
+            let lengthEnd = body.index(lengthStart, offsetBy: 3)
+            guard let length = Int(body[lengthStart..<lengthEnd]),
+                  body.distance(from: lengthEnd, to: body.endIndex) >= length else { return false }
+            index = body.index(lengthEnd, offsetBy: length)
+        }
+        return true
     }
 
     /// Disconnect from terminal
@@ -171,9 +184,7 @@ public class NapsConnection {
     private func receiveData(completion: @escaping (Result<Data, Error>) -> Void) {
         queue.async { [weak self] in
             guard let self = self else { return }
-            // Bytes that arrived after a previous read ended on the silence fallback
-            var receivedData = self.leftover
-            self.leftover = Data()
+            var receivedData = Data()
             var chunkCount = 0
             var finished = false
 
@@ -193,14 +204,6 @@ public class NapsConnection {
                         finish(.success(receivedData))
                     }
                 }
-            }
-
-            if NapsConnection.endsWithTerminator(receivedData) {
-                finish(.success(receivedData))
-                return
-            }
-            if !receivedData.isEmpty {
-                armSilenceFallback()
             }
 
             self.chunkHandler = { content, isComplete, error in
@@ -231,19 +234,15 @@ public class NapsConnection {
     }
 
     /// Issue a single outstanding receive. A receive left pending after a read
-    /// finished (silence fallback / timeout) is reused by the next read, and any
-    /// bytes it delivers with no active reader are kept in `leftover`.
+    /// finished (silence fallback / timeout) is reused by the next read; bytes it
+    /// delivers with no active reader belong to an earlier exchange and are dropped.
     private func pumpReceive() {
         guard !receiveOutstanding, let connection = connection else { return }
         receiveOutstanding = true
         connection.receive(minimumIncompleteLength: 1, maximumLength: 8192) { [weak self] content, _, isComplete, error in
             guard let self = self else { return }
             self.receiveOutstanding = false
-            if let handler = self.chunkHandler {
-                handler(content, isComplete, error)
-            } else if let data = content {
-                self.leftover.append(data)
-            }
+            self.chunkHandler?(content, isComplete, error)
         }
     }
 
