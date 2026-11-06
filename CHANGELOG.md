@@ -65,6 +65,13 @@ v5.4.4 terminal test (tkpay-sdk-pos-naps-rn 5fcfeb0).
 - Matching `TLVProtocol` builders (`buildManagementRequest`, `buildNetworkTestRequest`, …),
   `MessageTypes` constants and `TLVProtocol.Tide`.
 
+### Docs
+- README rewritten as an integrator guide (payment and void flows, every operation,
+  errors and timeouts, gateway notification, emulator testing, troubleshooting); every
+  Swift snippet compiles against the public API.
+- `Example/Quickstart`: runnable command-line quickstart (`swift run`), same code as
+  the README.
+
 ### Tests
 - In-process fake-terminal tests (terminator handling, silence fallback, decline,
   per-phase receipts, confirmation echo, two-phase void) and emulator integration

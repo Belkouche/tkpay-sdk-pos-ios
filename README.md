@@ -1,291 +1,487 @@
 # TKPay NAPS iOS SDK
 
-> Part of the NAPS SDK family — all speak the same M2M TLV protocol to the same terminals.
-> The **[C# SDK](https://github.com/Belkouche/tkpay-sdk-pos-naps-csharp) is canonical**
-> (reference implementation); this is the iOS port. Siblings:
+TKPayNaps is a Swift package that lets an iOS (or macOS) point-of-sale app drive a
+NAPS Pay payment terminal. Your app (the "ECR", electronic cash register) asks the
+terminal to take a card payment, void a payment or print reports. The terminal
+handles the card and the bank, then answers with the result and receipt lines.
+
+The SDK speaks the NAPS Pay ECR TLV protocol (Specification v2.0, NapsPay v5.4.4)
+**over TCP/IP only**:
+
+| Terminal (spec §2) | Connection the terminal offers | Supported by this SDK |
+|---|---|---|
+| Sunmi P2 | Wi-Fi TCP port 4444, USB | Yes, Wi-Fi TCP |
+| Sunmi P3 | Wi-Fi TCP port 4444, USB | Yes, Wi-Fi TCP |
+| Sunmi P2 Smart PAD | Wi-Fi TCP port 4444, USB | Yes, Wi-Fi TCP |
+| Ingenico Self 5000 | USB only | No |
+| Ingenico Lane 3600 | USB only | No |
+
+iOS has no API for a USB serial link to these terminals, so USB connections are not
+supported. The phone or tablet must be on the same network as the terminal.
+
+> Part of the NAPS SDK family. The [C# SDK](https://github.com/Belkouche/tkpay-sdk-pos-naps-csharp)
+> is the reference implementation. Siblings:
 > [Node.js](https://github.com/Belkouche/aslan-naps-node) ·
 > [Android](https://github.com/Belkouche/tkpay-sdk-pos-android) ·
 > [React Native](https://github.com/Belkouche/tkpay-sdk-pos-rn).
-> Test without hardware using the [emulator](https://github.com/Belkouche/tkpay-naps-emulator).
-> (iOS is TCP-only — Sunmi P2/P3; iOS has no USB-serial-to-terminal API.)
 
-Native iOS SDK for integrating NAPS Pay terminals with your iOS applications.
-Protocol baseline: TLV Protocol Specification v2.0 / NapsPay v5.4.4.
+## Contents
 
-## Requirements
+1. [Install](#install)
+2. [Quickstart](#quickstart)
+3. [How a payment works](#how-a-payment-works)
+4. [How a void works](#how-a-void-works)
+5. [Other operations](#other-operations)
+6. [Receipts, PAN masking and response codes](#receipts-pan-masking-and-response-codes)
+7. [Errors and timeouts](#errors-and-timeouts)
+8. [Transaction notifications](#transaction-notifications)
+9. [Testing with the emulator](#testing-with-the-emulator)
+10. [Troubleshooting](#troubleshooting)
+11. [Changelog](#changelog)
 
-- iOS 13.0+
-- macOS 10.15+ (for development)
-- Swift 5.5+
-- Xcode 13.0+
+## Install
 
-## Installation
+Requirements: iOS 13+ or macOS 10.15+, Swift 5.7+ (Xcode 14+). No dependencies.
 
-### Swift Package Manager
-
-Add the package to your `Package.swift`:
+Swift Package Manager, in `Package.swift`:
 
 ```swift
 dependencies: [
     .package(url: "https://github.com/Belkouche/tkpay-sdk-pos-naps-ios.git", from: "1.3.0")
 ]
+// and add "TKPayNaps" to your target's dependencies
 ```
 
-Or in Xcode:
-1. File → Add Packages...
-2. Enter: `https://github.com/Belkouche/tkpay-sdk-pos-naps-ios.git`
-3. Click "Add Package"
+Or in Xcode: **File → Add Package Dependencies…**, enter
+`https://github.com/Belkouche/tkpay-sdk-pos-naps-ios.git`, add the `TKPayNaps` library.
 
-## Quick Start
-
-```swift
-import TKPayNaps
-
-// Configure the client
-let config = NapsConfig(host: "192.168.24.214")
-let client = NapsPayClient(config: config)
-
-// Process a payment
-do {
-    let result = try await client.processPayment(
-        PaymentRequest(
-            amount: 100.0,        // Amount in MAD
-            registerId: "01",     // 2-digit register ID
-            cashierId: "00001"    // 5-digit cashier ID
-        )
-    )
-
-    if result.isApproved {
-        print("Payment approved!")
-        print("STAN: \(result.stan ?? "")")
-        print("Card: \(result.maskedCardNumber ?? "")")
-    } else {
-        print("Payment failed: \(result.error ?? "")")
-    }
-} catch {
-    print("Error: \(error)")
-}
-```
-
-## Configuration
-
-```swift
-let config = NapsConfig(
-    host: "192.168.24.214",    // Terminal IP address
-    port: 4444,                // Default: 4444
-    timeout: 120,              // Payment timeout in seconds (default: 120)
-    confirmationTimeout: 40,   // Confirmation timeout in seconds (default: 40)
-    protocolVersion: .v2       // TLV protocol version (default: .v2)
-)
-```
-
-### Protocol version (v1 / v2)
-
-The SDK speaks the NAPS TLV **v2** protocol by default (TCP/Sunmi terminals). The
-version selects the expected response terminator — `!` for v2, `?` for v1 — and the
-parser tolerates both. Set `protocolVersion: .v1` only when targeting a legacy
-terminal that ends messages with `?`.
-
-Under v2 the payment confirmation (TM=002) is enriched: it echoes the amount (MT/DE),
-the masked PAN (NCAR) and the card expiry (DAEX) from the approved payment response so
-the terminal can reinforce its coherence checks. This threading happens automatically
-inside `processPayment`.
-
-## API Reference
-
-### NapsPayClient
-
-The main client for interacting with NAPS Pay terminals.
-
-#### Methods
-
-##### `processPayment(_ request: PaymentRequest) async throws -> PaymentResult`
-
-Process a payment transaction using the two-phase flow:
-1. Send payment request → Customer taps card
-2. Send confirmation → Transaction complete
-
-```swift
-let result = try await client.processPayment(request)
-```
-
-##### Management operations
-
-```swift
-let ping   = try await client.networkTest()                 // TM=009 → NetworkTestResult
-let ref    = try await client.referencing(tide: TLVProtocol.Tide.merchant) // TM=013 → ReferencingResult
-let totals = try await client.totals()                      // TM=010 → TotalsResult
-let copy   = try await client.duplicateReceipt()            // TM=008 → PaymentResult
-try await client.resetPinPad()                              // TM=012
-```
-
-Each accepts optional `registerId` (default `"01"`) and `cashierId` (default `"00001"`).
-
-##### `testConnection() async -> Bool`
-
-Test connectivity to the terminal.
-
-```swift
-let isConnected = await client.testConnection()
-```
-
-### PaymentRequest
-
-```swift
-let request = PaymentRequest(
-    amount: 100.0,           // Amount in MAD
-    registerId: "01",        // 2-digit register ID
-    cashierId: "00001",      // 5-digit cashier ID
-    sequence: nil            // Optional: auto-generated if not provided
-)
-```
-
-### PaymentResult
-
-```swift
-struct PaymentResult {
-    let success: Bool
-    let responseCode: String?
-    let stan: String?                  // System Trace Audit Number
-    let maskedCardNumber: String?      // e.g., "516794******3315"
-    let cardExpiry: String?            // YYMM format
-    let cardholderName: String?
-    let entryMode: String?
-    let authNumber: String?
-    let ncai: String?
-    let sequence: String?
-    let transactionDate: String?       // DDMMYYYY
-    let transactionTime: String?       // HHMMSS
-    let merchantReceipt: Receipt?
-    let customerReceipt: Receipt?
-    let error: String?
-
-    var isApproved: Bool               // true if responseCode == "000"
-    var formattedExpiry: String?       // MM/YY format
-    var formattedCardNumber: String?   // Same as maskedCardNumber
-}
-```
-
-### Receipt
-
-```swift
-struct Receipt {
-    let type: ReceiptType              // .merchant or .customer
-    let lines: [ReceiptLine]
-
-    func toPlainText(width: Int = 32) -> String
-}
-
-struct ReceiptLine {
-    let lineNumber: String
-    let text: String
-    let bold: Bool
-    let alignment: Alignment           // .left, .center, .right
-}
-```
-
-### NapsError
-
-```swift
-enum NapsErrorCode {
-    case connectionFailed
-    case timeout
-    case invalidResponse
-}
-
-struct NapsError: Error {
-    let code: NapsErrorCode
-    let message: String
-}
-```
-
-## Response Codes
-
-The full v2 §6 response-code table is built into the SDK. Look up a human-readable
-message for any CR code with `TLVProtocol.describeResponse(_:)`, and test for approval
-with `TLVProtocol.isApproved(_:)` (approved codes: `000`, `001`, `003`, `007`).
-
-```swift
-TLVProtocol.describeResponse("116")   // "Insufficient funds"
-TLVProtocol.isApproved("000")         // true
-```
-
-Common codes:
-
-| Code | Description |
-|------|-------------|
-| 000  | Approved |
-| 001  | Approved with identification |
-| 003  | Approved (VIP) |
-| 007  | Approved, microchip update required |
-| 100  | Do not honour |
-| 101  | Card expired |
-| 116  | Insufficient funds |
-| 117  | Incorrect PIN |
-| 120  | Transaction not permitted at terminal |
-| 280  | Alternative amount cancelled |
-| 302  | Record not found on file |
-| 307  | Format error |
-| 480  | Reversal accepted |
-| 482  | Transaction already cancelled |
-| 909  | System failure |
-| 911  | Issuer did not respond in time |
-| 912  | Card issuer unavailable |
-| 995  | Server processing error |
-
-## Security
-
-This SDK implements PCI-DSS compliant card number masking:
-- Card numbers are masked immediately upon receipt (first 6 + last 4 digits visible)
-- Full PANs are never stored or logged
-- All card numbers in receipts are automatically masked
-
-## Network Requirements
-
-- The iOS device must be on the same network as the NAPS terminal
-- Port 4444 must be accessible
-- Add the following to your `Info.plist` for local network access:
+On iOS 14+, talking to a device on the local network needs this in your app's `Info.plist`:
 
 ```xml
 <key>NSLocalNetworkUsageDescription</key>
-<string>Required to communicate with payment terminal</string>
-<key>NSBonjourServices</key>
-<array>
-    <string>_tcp._tcp</string>
-</array>
+<string>Required to communicate with the payment terminal</string>
 ```
 
-## Example App
+## Quickstart
 
-See the `Example/` directory for a complete iOS app demonstrating SDK usage.
+One payment of 150.00 MAD against a terminal or the emulator on `127.0.0.1`. This is
+the code of [`Example/Quickstart`](Example/Quickstart/Sources/Quickstart/main.swift):
 
-## TLV Protocol
+```swift
+import Foundation
+import TKPayNaps
 
-The SDK implements the NAPS M2M TLV (Tag-Length-Value) protocol:
+let port = Int(ProcessInfo.processInfo.environment["NAPS_PORT"] ?? "") ?? 4444
+let client = NapsPayClient(config: NapsConfig(host: "127.0.0.1", port: port))
 
-| Tag | Name | Description |
-|-----|------|-------------|
-| 001 | TM | Message Type |
-| 002 | MT | Amount (minor units) |
-| 003 | NCAI | Register(2) + Cashier(5) |
-| 004 | NS | Sequence Number |
-| 007 | NCAR | Card Number (masked) |
-| 008 | STAN | System Trace Audit Number |
-| 009 | NA | Authorization Number |
-| 010 | DP | Print Data (Receipt) |
-| 012 | DE | Currency Code |
-| 013 | CR | Response Code |
-| 014 | DV | Card Expiry |
-| 015 | SH | Entry Mode |
-| 016 | DT | Transaction Date |
-| 017 | HT | Transaction Time |
-| 018 | NC | Cardholder Name |
+guard await client.testConnection() else {
+    print("Terminal unreachable on 127.0.0.1:\(port)")
+    exit(1)
+}
+
+let result = try await client.processPayment(
+    PaymentRequest(amount: 150.00, registerId: "01", cashierId: "00001"))
+
+if result.isApproved {
+    print("Approved: STAN \(result.stan ?? "-"), card \(result.maskedCardNumber ?? "-")")
+    print(result.customerReceipt?.toPlainText() ?? "(no receipt)")
+} else {
+    print("Not approved: CR \(result.responseCode), \(result.error ?? "")")
+}
+```
+
+Run it against the emulator (see [Testing with the emulator](#testing-with-the-emulator)):
+
+```bash
+python3 /Users/belkouche/Projects/tkpay/tkpay-naps-emulator/naps_emulator.py --port 4444 &
+cd Example/Quickstart && swift run
+```
+
+Output:
+
+```text
+Approved: STAN 668171, card 516794******3315
+                 TKpay
+--------------------------------
+06/11/2026 23:39:29
+TKPAY DEMO
+CASABLANCA
+...
+MONTANT: 150.00 MAD
+--------------------------------
+DEBIT
+Copie Client
+            Powered by NAPS
+```
+
+On a real terminal, replace `127.0.0.1` with the terminal's IP address (shown in the
+NapsPay app, assigned by your router).
+
+Identifiers you pass to every call:
+
+- `registerId`: 2 digits identifying the till, e.g. `"01"`.
+- `cashierId`: 5 digits identifying the cashier, e.g. `"00001"`.
+- Together they form the NCAI field (tag 003) that the terminal echoes back.
+
+## How a payment works
+
+A payment is two request/response exchanges **on the same TCP connection**.
+`processPayment` does both for you:
+
+```mermaid
+sequenceDiagram
+    participant App as Your app (ECR)
+    participant T as Terminal
+    App->>T: TM 001 payment request (amount, NCAI, NS, date/time)
+    Note over T: customer presents card, enters PIN,<br/>terminal gets the bank authorisation
+    T-->>App: TM 101 result (CR, STAN, masked PAN, merchant receipt)
+    alt CR = 000
+        App->>T: TM 002 confirmation (echoes STAN, amount, PAN, expiry)
+        T-->>App: TM 102 final result (CR, auth number, customer receipt)
+    else CR != 000
+        Note over App: declined: no confirmation is sent
+    end
+```
+
+1. **Phase 1.** The SDK sends TM 001 and waits up to `timeout` (default 120 s) while the
+   customer pays. A non-`000` code ends the payment: you get `success == false`, the
+   code, its description and the refusal receipt if the terminal sent one.
+2. **Phase 2.** On `000`, the SDK sends the confirmation TM 002 on the same connection,
+   echoing the STAN, amount, masked PAN and expiry. It waits up to
+   `confirmationTimeout` (default 40 s). The payment is approved only if TM 102 also
+   returns `000`. A refused confirmation (for example `307`) is reported as not approved.
+
+`result.isApproved` is true only when both phases succeeded. The merchant receipt
+comes from phase 1 and the customer receipt from phase 2. Keep `result.stan`: you need
+it to void the payment or reprint its receipt.
+
+`PaymentRequest.sequence` (NS, 6 digits) is optional. When omitted the client
+generates one. A sequence that is not 6 characters throws before anything is sent.
+
+## How a void works
+
+A void (cancellation) is also two exchanges on one connection. `cancelPayment` does both:
+
+```mermaid
+sequenceDiagram
+    participant App as Your app (ECR)
+    participant T as Terminal
+    App->>T: TM 003 void request (STAN of the payment, amount, NS)
+    T-->>App: TM 103 transaction found? (CR, amount, merchant receipt)
+    alt CR = 000
+        App->>T: TM 004 void confirmation (same NS, amount echoed from TM 103)
+        T-->>App: TM 104 void executed? (CR, void STAN, customer receipt)
+    else CR != 000
+        Note over App: not found / already cancelled: failure
+    end
+```
+
+TM 103 with `000` only means "transaction found". The reversal is executed by TM 004,
+and only TM 104 says whether it happened. The result therefore has three states:
+
+| Outcome | When | `success` | `pending` |
+|---|---|---|---|
+| **Success** | TM 104 returns `000` or `480` | `true` | `false` |
+| **Pending** | TM 104 returns `995`, or no TM 104 arrives within `confirmationTimeout` | `false` | `true` |
+| **Failure** | TM 103 refuses (e.g. `302` not found, `482` already cancelled) or TM 104 returns any other code, or a connection error | `false` | `false` |
+
+On success `stan` is the void's own STAN from TM 104. When the void is pending, `stan`
+is the **original payment's STAN** and `merchantReceipt` holds the TM 103 receipt, so
+you can check what happened:
+
+```swift
+let void = await client.cancelPayment(
+    stan: payment.stan ?? "",   // STAN of the payment to void
+    registerId: "01",
+    cashierId: "00001",
+    sequence: "000321",         // 6-digit NS for this void; the SDK reuses it in TM 004
+    amountCentimes: 15000)      // original amount in centimes (required by v5.4.4)
+
+if void.success {
+    print("Voided, void STAN \(void.stan ?? "-")")
+    print(void.customerReceipt?.toPlainText() ?? "")
+} else if void.pending {
+    // Outcome unknown: the terminal may or may not have reversed the payment.
+    // Do not retry blindly. Fetch the terminal's record for the original STAN
+    // and have the operator check it before deciding.
+    let record = try await client.duplicateReceipt(stan: void.stan)
+    print("Void unconfirmed (\(void.error ?? "")). Terminal record:")
+    print(record.merchantReceipt?.toPlainText() ?? "(no receipt)")
+} else {
+    print("Void failed: CR \(void.responseCode), \(void.error ?? "")")
+}
+```
+
+`cancelPayment` never throws: connection errors come back as a failure with
+`responseCode == ""` and the message in `error`. A second void of a payment that was
+already voided is refused with `482`.
+
+## Other operations
+
+Each operation opens its own connection, sends one request and returns the parsed
+reply. All take optional `registerId` (default `"01"`) and `cashierId` (default `"00001"`).
+Except for `settlement` and `testConnection`, they throw a `NapsError` on connection
+failure or timeout.
+
+**Connection check.** Opens and closes a TCP connection with a 5 s timeout. Nothing is
+sent to the terminal.
+
+```swift
+let reachable = await client.testConnection()
+```
+
+**Network test** (TM 009). Asks the terminal to check its link to the NAPS server.
+Run it before taking payments.
+
+```swift
+let ping = try await client.networkTest()
+print(ping.success ? ping.message : "Network down: \(ping.responseCode) \(ping.message)")
+```
+
+**Duplicate receipt** (TM 008). Reprints the receipt of a payment from the current
+business day by STAN, or of the last transaction when `stan` is omitted. Returns a
+`PaymentResult`; the receipt is in `merchantReceipt`.
+
+```swift
+let copy = try await client.duplicateReceipt(stan: "123456")
+if copy.success {
+    print(copy.merchantReceipt?.toPlainText() ?? "")
+}
+```
+
+**Totals** (TM 010). The day's payment totals for this register, as receipt text.
+
+```swift
+let totals = try await client.totals()
+if totals.success {
+    print(totals.receiptText ?? "")
+}
+```
+
+**Settlement** (end of day). Also sends TM 010, without a sequence number, and never
+throws: errors come back in `error` (`052` "Already settled today", `909` "Terminal or
+server is down").
+
+```swift
+let settlement = await client.settlement(registerId: "01", cashierId: "00001")
+print(settlement.success ? "Settled" : settlement.error ?? "")
+```
+
+**Referencing** (TM 013). Makes the terminal download its parameters from the NAPS
+server. Required before the terminal can take payments. `TLVProtocol.Tide.merchant`
+(`"01"`) loads merchant parameters, `TLVProtocol.Tide.recharge` (`"02"`) top-up
+parameters. Spec §7 says this can take more than 2 minutes, so give it a client with a
+longer `timeout`.
+
+```swift
+let slow = NapsPayClient(config: NapsConfig(host: "192.168.1.50", timeout: 300))
+let ref = try await slow.referencing(tide: TLVProtocol.Tide.merchant)
+print(ref.success ? (ref.receiptText ?? "") : "Referencing failed: \(ref.responseCode)")
+```
+
+**Reset PIN pad** (TM 012). Maintenance command; the reply is not inspected.
+
+```swift
+try await client.resetPinPad()
+```
+
+## Receipts, PAN masking and response codes
+
+**Receipts.** The terminal sends receipt lines in the DP block (tag 010). Each line has
+a line number (sub-tag 030), bold flag (031), alignment (032) and text (033), and lines
+are separated by `*`. The SDK parses this into a `Receipt`:
+
+```swift
+if let receipt = result.customerReceipt {
+    for line in receipt.lines {
+        print(line.lineNumber, line.bold, line.alignment, line.text)
+    }
+    print(receipt.toPlainText(width: 32))   // centred/right-aligned plain text, default width 40
+}
+```
+
+Which receipt is where:
+
+| Result | `merchantReceipt` | `customerReceipt` |
+|---|---|---|
+| Approved payment | TM 101 | TM 102 |
+| Declined payment | refusal receipt from TM 101, if sent | `nil` |
+| Void | TM 103 | TM 104, when it carries one |
+| Duplicate | TM 108 | `nil` |
+
+`totals()` and `referencing()` return the raw receipt text in `receiptText` instead.
+The SDK replaces centred "Naps" header lines with "TKPAY" and appends a "Powered by NAPS" line.
+
+**PAN masking.** The card number (tag 007) is masked as soon as it is parsed: first 6
+and last 4 digits, e.g. `516794******3315`. Any 16-digit number in receipt lines and in
+`receiptText` is masked the same way. The helpers are public:
+
+```swift
+TLVProtocol.maskCardNumber("5167940123453315")             // "516794******3315"
+TLVProtocol.maskCardNumbersInText("Carte 5167940123453315") // "Carte 516794******3315"
+```
+
+**Response codes.** The CR field (tag 013) is in `responseCode`. The full spec §6 table
+is in `TLVProtocol.responseCodes` (see `Sources/TKPayNaps/TLVProtocol.swift`):
+
+```swift
+TLVProtocol.describeResponse("116")   // "Insufficient funds"
+TLVProtocol.isApproved("001")         // true: 000, 001, 003 and 007 are approval codes
+let all = TLVProtocol.responseCodes   // [String: String]
+```
+
+`PaymentResult.isApproved` is stricter than `TLVProtocol.isApproved`: it requires
+`000` on both phases. Codes you will meet most often:
+
+| Code | Meaning |
+|---|---|
+| 000 | Approved / success |
+| 100 | Do not honour |
+| 116 | Insufficient funds |
+| 117 | Incorrect PIN |
+| 302 | Record not found (void of an unknown STAN) |
+| 307 | Format error (e.g. confirmation does not match the payment) |
+| 480 | Reversal accepted (void succeeded) |
+| 482 | Transaction already cancelled |
+| 909 | System failure (terminal or server down, or a required field missing) |
+| 995 | Server processing error (on a void: pending, see above) |
+
+## Errors and timeouts
+
+```swift
+let config = NapsConfig(
+    host: "192.168.1.50",       // terminal IP
+    port: 4444,                 // default 4444
+    timeout: 120,               // connect + each request, seconds (default 120)
+    confirmationTimeout: 40,    // TM 002 and TM 004 replies, seconds (default 40)
+    protocolVersion: .v2)       // .v2 (default, '!' terminator) or .v1 ('?')
+```
+
+- `timeout` bounds the TCP connect and every reply except the two confirmations.
+  The 120 s default covers the time a customer needs at the terminal.
+- `confirmationTimeout` bounds the TM 102 and TM 104 replies.
+- A reply ends at its `!` or `?` terminator. Some replies (TM 103/104 on v5.4.4) have
+  none: the SDK then treats 1 s of silence after the last bytes as the end of the reply.
+  Replies over 64 KB are rejected.
+
+Throwing calls throw `NapsError`, whose `code` is a `NapsErrorCode` and whose `message`
+is also its `localizedDescription`:
+
+```swift
+do {
+    let result = try await client.processPayment(
+        PaymentRequest(amount: 150.00, registerId: "01", cashierId: "00001"))
+    print(result.isApproved ? "Approved" : "Declined: \(result.error ?? "")")
+} catch let error as NapsError {
+    switch error.code {
+    case .connectionFailed: print("Cannot reach the terminal: \(error.message)")
+    case .timeout:          print("No reply in time")
+    case .invalidResponse:  print("Rejected or malformed: \(error.message)")
+    default:                print(error.message)
+    }
+}
+```
+
+Which call reports errors how:
+
+| Call | Declined / refused | Connection error, timeout |
+|---|---|---|
+| `processPayment` | returns `success == false` with `responseCode` and `error` | throws `NapsError` |
+| `cancelPayment` | returns failure or `pending` | returns failure (`responseCode == ""`); a missing TM 104 returns `pending` |
+| `settlement` | returns `success == false` with `error` | returns `success == false` |
+| `networkTest`, `totals`, `referencing`, `duplicateReceipt`, `resetPinPad` | returns `success == false` (or nothing for `resetPinPad`) | throws `NapsError` |
+| `testConnection` | n/a | returns `false` |
+
+`processPayment` also throws `.invalidResponse` before connecting when the request is
+invalid (amount not positive, `registerId` not 2 characters, `cashierId` not 5,
+`sequence` not 6), and when phase 2 is not a TM 102 reply.
+
+A timeout during phase 2 of a payment throws `.timeout`, but the terminal may already
+have authorised the card. Check with `duplicateReceipt()` before taking the payment again.
+
+## Transaction notifications
+
+After every payment the terminal answered (approved, declined or refused at
+confirmation), `processPayment` sends a JSON notification to
+the TKpay gateway (`POST https://api.tkpay.ma/v1/transactions/notify`). It runs in the
+background and never affects the payment result. It contains:
+
+- the terminal host, amount, currency, response code, STAN and authorisation number
+- the **masked** PAN, card expiry, entry mode and cardholder name
+- NCAI, register, cashier, sequence and transaction date/time
+- the SDK version, platform and a timestamp
+
+The URL is fixed and this cannot be turned off from the public API. Voids, settlement
+and the other operations send no notification.
+
+## Testing with the emulator
+
+The [NAPS emulator](https://github.com/Belkouche/tkpay-naps-emulator) is a Python 3
+(standard library only) program that behaves like a terminal, so you can develop
+without hardware:
+
+```bash
+python3 /Users/belkouche/Projects/tkpay/tkpay-naps-emulator/naps_emulator.py --port 4444
+```
+
+Point the SDK at `127.0.0.1:4444`. Useful `--mode` values:
+
+| Mode | Behaviour |
+|---|---|
+| `approve` (default) | Approves every payment and void |
+| `decline` | Declines payments (CR 100) |
+| `error --code 116` | Phase 1 returns the given code (any CR or scenario name) |
+| `confirm_error --code 302` | Phase 1 approves, the confirmation is refused with the code |
+| `no_confirm` | No reply to TM 002 (payment confirmation timeout) |
+| `timeout` | No reply to TM 001 |
+| `interactive` | Asks on the console to approve or decline each payment |
+| `void_480` | TM 104 returns 480 (void success) |
+| `void_995` | TM 104 returns 995 (void pending) |
+| `void_no_confirm` | No reply to TM 004 (void pending) |
+| `void_refuse --code 482` | TM 103 refuses the void with the code (e.g. 302, 482) |
+
+Other flags: `--protocol v1` ends replies with `?`, `--strict-confirm` refuses a
+confirmation whose amount or PAN does not match the payment, and `--debug` prints every
+field. The `void_*` modes need emulator commit `5cc8536` or later.
+
+**This repo's tests:**
+
+```bash
+swift build
+swift test                                    # unit + in-process fake-terminal tests
+```
+
+Integration tests run only when `NAPS_EMULATOR_PORT` is set. Each test belongs to one
+emulator mode. Set `NAPS_EMULATOR_MODE` (and `NAPS_EMULATOR_CODE` for modes that take
+`--code`) to match how you started the emulator:
+
+```bash
+python3 /Users/belkouche/Projects/tkpay/tkpay-naps-emulator/naps_emulator.py --port 4455 --mode void_refuse --code 482 &
+NAPS_EMULATOR_PORT=4455 NAPS_EMULATOR_MODE=void_refuse NAPS_EMULATOR_CODE=482 swift test
+```
+
+Modes with tests: `approve`, `decline`, `error`, `confirm_error`, `no_confirm`,
+`timeout`, `void_480`, `void_995`, `void_no_confirm`, `void_refuse`.
+
+## Troubleshooting
+
+| Symptom | Likely cause and fix |
+|---|---|
+| `testConnection()` returns `false`, or `.connectionFailed` | Wrong IP or port, the device is on another network or Wi-Fi isolation is on, NapsPay is not running on the terminal, or the local-network permission was denied (iOS Settings → Privacy → Local Network). Check that port 4444 is reachable from the device. |
+| `.timeout` on a payment | Nobody presented a card within `timeout`, or the terminal is not on its "waiting for till" screen. If it happens in phase 2, check with `duplicateReceipt()` before retrying. |
+| CR `909` | Terminal or NAPS server unreachable (run `networkTest()`), referencing never done (run `referencing()`), or a required field missing (TM 004 without amount: pass `amountCentimes` to `cancelPayment`). |
+| CR `302` on a void | No transaction with that STAN in the current business day. Check the STAN and that the payment was made today on this terminal. |
+| CR `482` on a void | The payment was already voided. Treat as done; do not retry. |
+| Void returns `pending` | TM 104 was `995` or never arrived. The reversal may or may not have happened. Use `duplicateReceipt(stan: void.stan)` and check before any retry. |
+| CR `307` | A request did not match what the terminal expected, e.g. a confirmation whose amount or PAN differs from the payment. |
+| CR `052` on settlement | Already settled today. |
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md). Version 1.3.0 is the NapsPay v5.4.4 sync: reply
+framing, per-phase receipts, management operations and the spec-correct void flow
+with the `pending` state.
 
 ## License
 
-MIT License - see LICENSE file for details.
-
-## Support
-
-For issues and questions, please visit:
-https://github.com/Belkouche/tkpay-sdk-pos-naps-ios/issues
+MIT. See [LICENSE](LICENSE).
