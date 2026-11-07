@@ -47,7 +47,7 @@ Swift Package Manager, in `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/Belkouche/tkpay-sdk-pos-naps-ios.git", from: "1.3.0")
+    .package(url: "https://github.com/Belkouche/tkpay-sdk-pos-naps-ios.git", from: "1.3.1")
 ]
 // and add "TKPayNaps" to your target's dependencies
 ```

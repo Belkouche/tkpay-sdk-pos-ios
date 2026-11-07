@@ -2,6 +2,23 @@
 
 All notable changes to the TKPay NAPS iOS SDK are documented here.
 
+## [1.3.1] - 2026-11-07
+
+- **Card numbers.** Card numbers are masked (first 6 + last 4 digits) as soon as the
+  reply is read, and the full number is never exposed or logged:
+  - tag 007 is always returned as first 6 + `*` + last 4 digits, whatever grouping it
+    arrived in;
+  - receipt and other text mask every run of 13 or more digits whose digits are
+    adjacent or separated by exactly one space, dash, dot, tab or non-breaking space
+    (previously only 16 contiguous digits). All digits but the first 6 and last 4 of
+    the run become `*`, separators and layout are kept, and runs longer than 19
+    digits are masked too. Dates, times and amounts are left alone;
+  - the DP block is masked line by line when the reply is parsed, so
+    `TotalsResult.receiptText` and `ReferencingResult.receiptText` no longer leak a PAN
+    that followed a sub-tag length header;
+  - `NapsConnection.sendAndReceive` returns the reply with card numbers masked
+    (`TLVProtocol.maskFrame`).
+
 ## [1.3.0] - 2026-11-06
 
 Sync with NapsPay v5.4.4 / canonical C# SDK (TKPay.Naps 1.4.0).
@@ -31,20 +48,8 @@ Sync with NapsPay v5.4.4 / canonical C# SDK (TKPay.Naps 1.4.0).
 - **TLV length hardening.** Length fields must be exactly three ASCII digits; a
   signed length such as `-01` previously made the parser crash or the framer loop.
   Responses larger than 64 KB are rejected.
-- **Card numbers.** Card numbers are masked (first 6 + last 4 digits) as soon as the
-  reply is read, and the full number is never exposed or logged:
-  - tag 007 is always returned as first 6 + `*` + last 4 digits, whatever grouping it
-    arrived in;
-  - receipt and other text mask every run of 13 or more digits whose digits are
-    adjacent or separated by exactly one space, dash, dot, tab or non-breaking space
-    (previously only 16 contiguous digits). All digits but the first 6 and last 4 of
-    the run become `*`, separators and layout are kept, and runs longer than 19
-    digits are masked too. Dates, times and amounts are left alone;
-  - the DP block is masked line by line when the reply is parsed, so
-    `TotalsResult.receiptText` and `ReferencingResult.receiptText` no longer leak a PAN
-    that followed a sub-tag length header;
-  - `NapsConnection.sendAndReceive` returns the reply with card numbers masked
-    (`TLVProtocol.maskFrame`).
+- **PAN masking.** `ReferencingResult.receiptText` and `TotalsResult.receiptText`
+  mask card numbers like every other receipt path.
 
 ### Changed
 - Payment request (TM=001) sends DA/HE alongside DATR/HETR, matching the reference SDK.
