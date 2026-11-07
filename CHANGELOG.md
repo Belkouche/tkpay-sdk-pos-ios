@@ -12,10 +12,16 @@ Sync with NapsPay v5.4.4 / canonical C# SDK (TKPay.Naps 1.4.0).
   exchange against a v5.4.4 terminal timed out. Reads now stop at the terminator,
   fall back to 1 s of inter-chunk silence for unterminated frames, and strip the
   terminator before parsing.
-- **Receipts.** DP entry groups are split on the `*` separator (digit runs inside
-  a value such as a PAN can no longer be misread as sub-tags). The merchant copy
-  comes from the Phase-1 response (TM=101) and the customer copy from Phase 2
-  (TM=102); both were previously parsed from Phase 2.
+- **Receipts (spec §5).** The DP block is parsed by sub-tag length, so a `*` or `?`
+  inside a line (e.g. the masked PAN `516794******3315`, previously a blank line) no
+  longer splits or truncates it. Every line is kept in order with its line number,
+  bold flag and alignment, exactly as sent; a full PAN in the text is masked. The
+  merchant copy comes from the Phase-1 response (TM=101) and the customer copy from
+  Phase 2 (TM=102); both were previously parsed from Phase 2.
+- **Terminators inside values.** `TLVProtocol.parse` cut the frame at the first `!`/`?`
+  anywhere, losing a DP field that contained one (e.g. the spec's `?` end marker), and
+  the reader stripped a final `?` that belonged to a DP value. Both now treat a
+  terminator as end-of-frame only between fields.
 - **Framing.** A terminator only ends a read when it follows complete TLV units, so a
   `!`/`?` inside a value or at the end of a partial chunk no longer truncates the
   response. Late bytes from an earlier exchange are dropped, never prepended.
@@ -35,8 +41,9 @@ Sync with NapsPay v5.4.4 / canonical C# SDK (TKPay.Naps 1.4.0).
   messages for 909/302/482/480.
 - Settlement errors: `052` → "Already settled today", `909` → "Terminal or server is down".
 - `PaymentRequest.sequence`, when provided, must be 6 digits.
-- Receipt branding matches the reference SDK: centred "Naps" lines become "TKPAY"
-  and "Powered by NAPS" is appended as the last line.
+- Receipts carry no SDK-added text: the "Powered by NAPS" footer and the rewriting of
+  centred "Naps" lines to "TKPAY" are removed.
+- `TotalsResult.receipt` and `ReferencingResult.receipt`: the parsed TM 110 / TM 113 receipt.
 
 ### Changed — void (TM 003 → 103, TM 004 → 104), per spec v2.0 §4.3–4.4
 Checked against the NapsPay ECR TLV Protocol Specification v2.0 and the live
@@ -69,6 +76,7 @@ v5.4.4 terminal test (tkpay-sdk-pos-naps-rn 5fcfeb0).
 - README rewritten as an integrator guide (payment and void flows, every operation,
   errors and timeouts, gateway notification, emulator testing, troubleshooting); every
   Swift snippet compiles against the public API.
+- README receipt section: which copy is where, printing both copies, line metadata.
 - `Example/Quickstart`: runnable command-line quickstart (`swift run`), same code as
   the README.
 

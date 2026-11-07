@@ -97,21 +97,27 @@ python3 ../tkpay-naps-emulator/naps_emulator.py --port 4444 &
 cd Example/Quickstart && swift run
 ```
 
-Output:
+Output (the customer copy, exactly as the terminal sent it):
 
 ```text
-Approved: STAN 668171, card 516794******3315
+Approved: STAN 917682, card 516794******3315
                  TKpay
 --------------------------------
-06/11/2026 23:39:29
+07/11/2026 00:14:32
 TKPAY DEMO
 CASABLANCA
-...
+--------------------------------
+VISA
+516794******3315
+Terminal: 00000001
+Transaction: 917682
+Autorisation: 388581
+STAN: 917682
+--------------------------------
 MONTANT: 150.00 MAD
 --------------------------------
 DEBIT
 Copie Client
-            Powered by NAPS
 ```
 
 On a real terminal, replace `127.0.0.1` with the terminal's IP address (shown in the
@@ -287,30 +293,81 @@ try await client.resetPinPad()
 
 ## Receipts, PAN masking and response codes
 
-**Receipts.** The terminal sends receipt lines in the DP block (tag 010). Each line has
-a line number (sub-tag 030), bold flag (031), alignment (032) and text (033), and lines
-are separated by `*`. The SDK parses this into a `Receipt`:
+**Receipts.** The receipt is the DP block (tag 010) the terminal sends, in the
+layout certified for the interbank network (spec §5). Each line has four sub-tags:
+
+| Sub-tag | Field | SDK |
+|---|---|---|
+| 030 | line number | `ReceiptLine.lineNumber` |
+| 031 | `S` normal / `G` bold | `ReceiptLine.bold` |
+| 032 | `C` centre / `D` right / `G` left | `ReceiptLine.alignment` (`.center`, `.right`, `.left`) |
+| 033 | text | `ReceiptLine.text` |
+
+Lines are separated by `*` and the block may end with `?`. The SDK reads each sub-tag
+by its declared length, so a `*` or `?` inside the text (such as the masked PAN
+`516794******3315`) stays part of the line. It keeps every line, in order, exactly as
+sent. It adds no header or footer and drops no line; the only change is masking a full
+PAN if one appears in the text.
+
+Which copy is where:
+
+| Operation | `merchantReceipt` | `customerReceipt` |
+|---|---|---|
+| Approved payment | TM 101 ("Copie Commercant") | TM 102 ("Copie Client") |
+| Declined payment | refusal receipt from TM 101, if sent | `nil` |
+| Void, success | TM 103 ("ANNULATION", "Copie Commercant") | TM 104 ("ANNULATION", "Copie Client") |
+| Void, pending | TM 103 | TM 104 if it carried one (995), else `nil` |
+| Duplicate (`duplicateReceipt`) | TM 108 | `nil` |
+
+`totals()` (TM 110) and `referencing()` (TM 113) return the parsed receipt in
+`receipt`, plus the raw DP string in `receiptText`.
+
+Print both copies of a payment:
 
 ```swift
-if let receipt = result.customerReceipt {
-    for line in receipt.lines {
-        print(line.lineNumber, line.bold, line.alignment, line.text)
-    }
-    print(receipt.toPlainText(width: 32))   // centred/right-aligned plain text, default width 40
+let payment = try await client.processPayment(
+    PaymentRequest(amount: 10.00, registerId: "01", cashierId: "00001"))
+if payment.isApproved {
+    print(payment.merchantReceipt?.toPlainText() ?? "(no merchant copy)")   // keep
+    print(payment.customerReceipt?.toPlainText() ?? "(no customer copy)")   // hand over
 }
 ```
 
-Which receipt is where:
+`toPlainText(width:)` renders one text line per receipt line, padding centred and
+right-aligned lines to `width` (default 40). To drive a printer, use each line's
+metadata instead:
 
-| Result | `merchantReceipt` | `customerReceipt` |
-|---|---|---|
-| Approved payment | TM 101 | TM 102 |
-| Declined payment | refusal receipt from TM 101, if sent | `nil` |
-| Void | TM 103 | TM 104, when it carries one |
-| Duplicate | TM 108 | `nil` |
+```swift
+for line in payment.customerReceipt?.lines ?? [] {
+    // e.g. printer.setBold(line.bold); printer.setAlignment(line.alignment)
+    print(line.lineNumber, line.bold ? "bold" : "normal", line.alignment, line.text)
+}
+```
 
-`totals()` and `referencing()` return the raw receipt text in `receiptText` instead.
-The SDK replaces centred "Naps" header lines with "TKPAY" and appends a "Powered by NAPS" line.
+The customer copy of a 10.00 MAD payment on the emulator renders as (each line trimmed):
+
+```text
+TKpay
+--------------------------------
+07/11/2026 00:12:10
+TKPAY DEMO
+CASABLANCA
+--------------------------------
+VISA
+516794******3315
+Terminal: 00000001
+Transaction: 514135
+Autorisation: 635927
+STAN: 514135
+--------------------------------
+MONTANT: 10.00 MAD
+--------------------------------
+DEBIT
+Copie Client
+```
+
+The merchant copy ends with "Copie Commercant". The void copies have "ANNULATION"
+in place of "DEBIT".
 
 **PAN masking.** The card number (tag 007) is masked as soon as it is parsed: first 6
 and last 4 digits, e.g. `516794******3315`. Any 16-digit number in receipt lines and in

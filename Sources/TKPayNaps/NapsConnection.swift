@@ -95,8 +95,9 @@ public class NapsConnection {
             throw NapsError.invalidResponse("Empty response from terminal")
         }
 
-        // Strip the trailing terminator ('!' v2, '?' v1) if present
-        if let last = responseString.last, NapsConnection.isTerminator(last) {
+        // Strip the trailing terminator ('!' v2, '?' v1) only when it follows complete
+        // TLV units: a '?' that ends a DP value (spec §5) belongs to the value.
+        if NapsConnection.endsWithTerminator(response) {
             responseString.removeLast()
         }
 

@@ -111,6 +111,64 @@ final class EmulatorIntegrationTests: XCTestCase {
         XCTAssertTrue(result.customerReceipt?.toPlainText().contains("Copie Client") ?? false)
     }
 
+    // MARK: - Receipts (spec §5: every DP line, in order, as sent)
+
+    /// Asserts the emulator's receipt layout line by line; date, transaction and
+    /// authorisation vary, the STAN must be `stan`.
+    private func assertEmulatorReceipt(_ receipt: Receipt?, stan: String?, label: String, copy: String,
+                                       file: StaticString = #filePath, line: UInt = #line) throws {
+        let receipt = try XCTUnwrap(receipt, "missing \(copy)", file: file, line: line)
+        let lines = receipt.toPlainText().split(separator: "\n", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+        let stan = try XCTUnwrap(stan, file: file, line: line)
+        let sep = "--------------------------------"
+        let expected: [String] = [
+            "TKpay", sep, "#date", "TKPAY DEMO", "CASABLANCA", sep, "VISA", "516794******3315",
+            "Terminal: 00000001", "#Transaction: ", "#Autorisation: ", "STAN: \(stan)",
+            sep, "MONTANT: 10.00 MAD", sep, label, copy,
+        ]
+        XCTAssertEqual(lines.count, expected.count, lines.joined(separator: "\n"), file: file, line: line)
+        for (got, want) in zip(lines, expected) {
+            if want == "#date" {
+                XCTAssertNotNil(got.range(of: #"^\d{2}/\d{2}/\d{4} \d{2}:\d{2}:\d{2}$"#, options: .regularExpression),
+                                got, file: file, line: line)
+            } else if want.hasPrefix("#") {
+                let prefix = String(want.dropFirst())
+                XCTAssertNotNil(got.range(of: "^\(prefix)\\d{6}$", options: .regularExpression), got, file: file, line: line)
+            } else {
+                XCTAssertEqual(got, want, file: file, line: line)
+            }
+        }
+        XCTAssertTrue(receipt.lines[0].bold, file: file, line: line)
+        XCTAssertEqual(receipt.lines[0].alignment, .center, file: file, line: line)
+    }
+
+    func testPaymentReceiptsBothCopies() async throws {
+        try requireMode("approve")
+        let result = try await client.processPayment(
+            PaymentRequest(amount: 10.00, registerId: "01", cashierId: "00001"))
+        XCTAssertTrue(result.isApproved, result.error ?? "")
+        try assertEmulatorReceipt(result.merchantReceipt, stan: result.stan, label: "DEBIT", copy: "Copie Commercant")
+        try assertEmulatorReceipt(result.customerReceipt, stan: result.stan, label: "DEBIT", copy: "Copie Client")
+        print("--- payment merchant copy\n\(result.merchantReceipt!.toPlainText())")
+        print("--- payment customer copy\n\(result.customerReceipt!.toPlainText())")
+    }
+
+    func testVoidReceiptsBothCopies() async throws {
+        try requireMode("approve")
+        let payment = try await client.processPayment(
+            PaymentRequest(amount: 10.00, registerId: "01", cashierId: "00001"))
+        let stan = try XCTUnwrap(payment.stan)
+        let result = await client.cancelPayment(
+            stan: stan, registerId: "01", cashierId: "00001", sequence: "000322", amountCentimes: 1000)
+        XCTAssertTrue(result.success, result.error ?? "")
+        // TM 103 copy shows the original STAN, TM 104 copy the void STAN
+        try assertEmulatorReceipt(result.merchantReceipt, stan: stan, label: "ANNULATION", copy: "Copie Commercant")
+        try assertEmulatorReceipt(result.customerReceipt, stan: result.stan, label: "ANNULATION", copy: "Copie Client")
+        print("--- void merchant copy\n\(result.merchantReceipt!.toPlainText())")
+        print("--- void customer copy\n\(result.customerReceipt!.toPlainText())")
+    }
+
     // MARK: - Void modes (TM 103/104 arrive without a terminator)
 
     private func void(confirmationTimeout: TimeInterval = 10) async -> CancellationResult {

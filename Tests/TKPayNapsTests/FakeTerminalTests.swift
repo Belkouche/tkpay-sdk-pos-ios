@@ -263,6 +263,22 @@ final class FakeTerminalTests: XCTestCase {
         XCTAssertEqual(result.error, "Cancellation failed with code: 482")
     }
 
+    func testUnterminatedFrameKeepsDPEndMarker() async throws {
+        // TM 103/104 arrive without a frame terminator; the DP value itself ends with
+        // the spec §5 '?' end marker, which must not be stripped as a terminator.
+        let r103 = f("001", "103") + f("013", "000") + f("002", "15000") + f("008", "111111")
+        let r104 = f("001", "104") + f("013", "000") + f("008", "222222")
+            + f("010", dp("ANNULATION") + "*03000224031001S032001G033012Copie Client?")
+        try await withTerminal([[r103], [r104]]) { port, _ in
+            let client = NapsPayClient(config: NapsConfig(host: "127.0.0.1", port: port, timeout: 10))
+            let result = await client.cancelPayment(
+                stan: "111111", registerId: "01", cashierId: "00001", sequence: "000321", amountCentimes: 15000)
+
+            XCTAssertTrue(result.success, result.error ?? "")
+            XCTAssertEqual(result.customerReceipt?.lines.map { $0.text }, ["ANNULATION", "Copie Client"])
+        }
+    }
+
     func testRejectsInvalidSequenceLength() async {
         let client = NapsPayClient(config: NapsConfig(host: "127.0.0.1", port: 1))
         do {

@@ -325,11 +325,12 @@ final class TKPayNapsTests: XCTestCase {
         let receipt = TLVProtocol.parseReceipt(dp, type: .customer)
         let texts = receipt.lines.map { $0.text }
 
-        XCTAssertEqual(texts, ["TKPAY", "516794******3315", "Copie Client", "Powered by NAPS"])
+        // Lines as sent (no rebranding, no added footer); full PAN masked, not blanked
+        XCTAssertEqual(texts, ["Naps", "516794******3315", "Copie Client"])
         XCTAssertTrue(receipt.lines[0].bold)
         XCTAssertEqual(receipt.lines[0].alignment, .center)
-        XCTAssertEqual(receipt.lines.last?.lineNumber, "25")
-        XCTAssertEqual(receipt.lines.last?.alignment, .center)
+        XCTAssertEqual(receipt.lines.last?.lineNumber, "24")
+        XCTAssertEqual(receipt.lines.last?.alignment, .left)
     }
 
     func testCancellationConfirmationCarriesSequenceInNS() {
@@ -360,7 +361,10 @@ final class TKPayNapsTests: XCTestCase {
 
         XCTAssertFalse(NapsConnection.endsWithTerminator(Data("001-01X!".utf8)))
         XCTAssertEqual(TLVProtocol.parse("001003101013-01X!"), ["001": "101"])
-        XCTAssertEqual(TLVProtocol.parseReceipt("030-01X", type: .merchant).lines.map { $0.text }, ["Powered by NAPS"])
+        // Terminators inside values are data; one between fields ends the frame
+        XCTAssertEqual(TLVProtocol.parse("001003101010006Merci?013003000!008006999999"),
+                       ["001": "101", "010": "Merci?", "013": "000"])
+        XCTAssertEqual(TLVProtocol.parseReceipt("030-01X", type: .merchant).lines.map { $0.text }, [])
     }
 
     func testTerminatorDetection() {

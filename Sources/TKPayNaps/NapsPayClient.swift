@@ -315,7 +315,8 @@ public class NapsPayClient {
             success: rc == "000",
             responseCode: rc,
             parameterSet: tide,
-            receiptText: fields[TLVProtocol.Tags.DP].map(TLVProtocol.maskCardNumbersInText)
+            receiptText: fields[TLVProtocol.Tags.DP].map(TLVProtocol.maskCardNumbersInText),
+            receipt: fields[TLVProtocol.Tags.DP].map { TLVProtocol.parseReceipt($0, type: .merchant) }
         )
     }
 
@@ -324,7 +325,9 @@ public class NapsPayClient {
         let fields = try await sendManagement(
             TLVProtocol.buildTotalsRequest(ncai: registerId + cashierId, sequence: generateSequence()))
         let rc = fields[TLVProtocol.Tags.CR] ?? ""
-        return TotalsResult(success: rc == "000", responseCode: rc, receiptText: fields[TLVProtocol.Tags.DP].map(TLVProtocol.maskCardNumbersInText))
+        return TotalsResult(success: rc == "000", responseCode: rc,
+                            receiptText: fields[TLVProtocol.Tags.DP].map(TLVProtocol.maskCardNumbersInText),
+                            receipt: fields[TLVProtocol.Tags.DP].map { TLVProtocol.parseReceipt($0, type: .merchant) })
     }
 
     /// Duplicate receipt / reprint (TM=008). Reprints the receipt of `stan`, or of the

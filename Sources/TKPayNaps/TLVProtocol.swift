@@ -411,18 +411,12 @@ public enum TLVProtocol {
     public static func parse(_ tlvString: String) -> [String: String] {
         var fields: [String: String] = [:]
 
-        // Truncate at the first terminator ('!' v2, '?' v1) if present.
-        let body: Substring
-        if let term = tlvString.firstIndex(where: { $0 == "!" || $0 == "?" }) {
-            body = tlvString[tlvString.startIndex..<term]
-        } else {
-            body = tlvString[...]
-        }
-        let tlvString = String(body)
-
         var index = tlvString.startIndex
 
         while index < tlvString.endIndex {
+            // A terminator ('!' v2, '?' v1) ends the frame only between fields; inside
+            // a value (e.g. the DP '?' end marker, "Merci!") it is data.
+            if tlvString[index] == "!" || tlvString[index] == "?" { break }
             // Need at least 6 chars for tag + length
             guard tlvString.distance(from: index, to: tlvString.endIndex) >= 6 else { break }
 
@@ -455,64 +449,61 @@ public enum TLVProtocol {
 
     // MARK: - Receipt Parsing
 
-    /// Parse receipt data from DP tag value.
+    /// Parse receipt data from DP tag value (spec §5).
     ///
-    /// The terminal separates receipt entry groups with `*`; each group is
-    /// 030(line number) 031(format) 032(alignment) 033(content). Splitting on `*`
-    /// keeps digit runs inside a value (e.g. a PAN containing "030002") from being
-    /// misread as sub-tags.
+    /// Each line is 030(line number) 031(S/G bold) 032(C/D/G alignment) 033(text).
+    /// Sub-tags are read by their declared lengths, so a '*' or '?' inside a value
+    /// (e.g. a masked PAN "516794******3315") stays part of the text; between lines
+    /// '*' separates and '?' ends the block. Every line is kept, in order, exactly as
+    /// sent, except that a full PAN in the text is masked.
     public static func parseReceipt(_ dpValue: String, type: ReceiptType) -> Receipt {
         var lines: [ReceiptLine] = []
+        var lineNumber: String?
+        var format = "S"
+        var alignmentCode = "G"
+        var content = ""
 
-        for entry in dpValue.split(separator: "*", omittingEmptySubsequences: true) {
-            let entry = String(entry)
-            var index = entry.startIndex
-            var lineNumber = ""
-            var format = "S"
-            var alignmentCode = "G"
-            var content = ""
-
-            while entry.distance(from: index, to: entry.endIndex) >= 6 {
-                let tagEnd = entry.index(index, offsetBy: 3)
-                let tag = String(entry[index..<tagEnd])
-
-                let lengthEnd = entry.index(tagEnd, offsetBy: 3)
-                guard let length = tlvLength(entry[tagEnd..<lengthEnd]) else { break }
-                guard entry.distance(from: lengthEnd, to: entry.endIndex) >= length else { break }
-
-                let valueEnd = entry.index(lengthEnd, offsetBy: length)
-                let value = String(entry[lengthEnd..<valueEnd])
-
-                switch tag {
-                case ReceiptTags.lineNumber: lineNumber = value
-                case ReceiptTags.format: format = value
-                case ReceiptTags.alignment: alignmentCode = value
-                case ReceiptTags.content: content = value
-                default: break
-                }
-
-                index = valueEnd
+        func flush() {
+            if let number = lineNumber {
+                lines.append(createReceiptLine(number, maskCardNumbersInText(content), format, alignmentCode))
             }
-
-            if !lineNumber.isEmpty {
-                lines.append(createReceiptLine(lineNumber, content, format, alignmentCode))
-            }
+            lineNumber = nil
+            format = "S"
+            alignmentCode = "G"
+            content = ""
         }
 
-        // Apply TKPAY branding
-        let brandedLines = applyBranding(lines)
+        var index = dpValue.startIndex
+        while index < dpValue.endIndex {
+            let c = dpValue[index]
+            if c == "*" {
+                flush()
+                index = dpValue.index(after: index)
+                continue
+            }
+            if c == "?" { break }
+            guard dpValue.distance(from: index, to: dpValue.endIndex) >= 6 else { break }
+            let tagEnd = dpValue.index(index, offsetBy: 3)
+            let lengthEnd = dpValue.index(tagEnd, offsetBy: 3)
+            guard let length = tlvLength(dpValue[tagEnd..<lengthEnd]),
+                  dpValue.distance(from: lengthEnd, to: dpValue.endIndex) >= length else { break }
+            let valueEnd = dpValue.index(lengthEnd, offsetBy: length)
+            let value = String(dpValue[lengthEnd..<valueEnd])
 
-        // Mask any card numbers in receipt
-        let maskedLines = brandedLines.map { line in
-            ReceiptLine(
-                lineNumber: line.lineNumber,
-                text: maskCardNumbersInText(line.text),
-                bold: line.bold,
-                alignment: line.alignment
-            )
+            switch String(dpValue[index..<tagEnd]) {
+            case ReceiptTags.lineNumber:
+                if lineNumber != nil { flush() }   // new line without a '*' separator
+                lineNumber = value
+            case ReceiptTags.format: format = value
+            case ReceiptTags.alignment: alignmentCode = value
+            case ReceiptTags.content: content = value
+            default: break
+            }
+            index = valueEnd
         }
+        flush()
 
-        return Receipt(type: type, lines: maskedLines)
+        return Receipt(type: type, lines: lines)
     }
 
     // MARK: - Security
@@ -596,19 +587,5 @@ public enum TLVProtocol {
             bold: bold,
             alignment: alignment
         )
-    }
-
-    /// Replace centred "Naps" header lines with "TKPAY" and append "Powered by NAPS"
-    /// as the last line (matches the reference SDK).
-    private static func applyBranding(_ lines: [ReceiptLine]) -> [ReceiptLine] {
-        var result = lines.map { line -> ReceiptLine in
-            guard line.alignment == .center, line.text.lowercased().contains("naps") else { return line }
-            return ReceiptLine(lineNumber: line.lineNumber, text: "TKPAY", bold: true, alignment: .center)
-        }
-
-        let lastNumber = result.last.flatMap { Int($0.lineNumber) }.map { String(format: "%02d", $0 + 1) } ?? "99"
-        result.append(ReceiptLine(lineNumber: lastNumber, text: "Powered by NAPS", bold: false, alignment: .center))
-
-        return result
     }
 }

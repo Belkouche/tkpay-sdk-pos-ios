@@ -234,6 +234,8 @@ public struct ReferencingResult {
     public let parameterSet: String
     /// Raw printable data (DP) returned by the terminal, if any
     public let receiptText: String?
+    /// Parsed receipt (DP lines in order, with bold/alignment)
+    public var receipt: Receipt? = nil
 }
 
 /// Totals report result for TM=010
@@ -244,6 +246,8 @@ public struct TotalsResult {
     public let responseCode: String
     /// Raw printable data (DP) returned by the terminal, if any
     public let receiptText: String?
+    /// Parsed receipt (DP lines in order, with bold/alignment)
+    public var receipt: Receipt? = nil
 }
 
 // MARK: - Errors
