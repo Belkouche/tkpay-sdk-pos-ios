@@ -329,15 +329,40 @@ final class FakeTerminalTests: XCTestCase {
     }
 
     func testMaskCardNumbersInTextCoversLengthsAndSeparators() {
-        XCTAssertEqual(TLVProtocol.maskCardNumbersInText("Carte 5167 9400 0012 3315 OK"), "Carte 5167 94** **** 3315 OK")
-        XCTAssertEqual(TLVProtocol.maskCardNumbersInText("5167-9400-0012-3315"), "5167-94**-****-3315")
-        XCTAssertEqual(TLVProtocol.maskCardNumbersInText("Ref " + Self.pan19), "Ref 601234*********4567")
-        XCTAssertEqual(TLVProtocol.maskCardNumbersInText("4111111111111"), "411111***1111")   // 13 digits
-        for untouched in ["Terminal: 00000001", "07/11/2026 00:12:10", "MONTANT: 10.00 MAD",
-                          "516794******3315", "123456789012", "12345678901234567890"] {
+        // Shared rule across the NAPS SDKs
+        let vectors: [(String, String)] = [
+            ("5167940000123315", "516794******3315"),
+            ("5167 9400 0012 3315", "5167 94** **** 3315"),
+            ("5167-9400-0012-3315", "5167-94**-****-3315"),
+            ("5167.9400.0012.3315", "5167.94**.****.3315"),
+            ("6011000990139424127", "601100*********4127"),
+            ("5167 9400 0012 3315 0000", "5167 94** **** **** 0000"),
+            ("07/11/2026 00:12:10", "07/11/2026 00:12:10"),
+            ("MONTANT: 10.00 MAD", "MONTANT: 10.00 MAD"),
+            ("Terminal: 00000001", "Terminal: 00000001"),
+        ]
+        for (input, expected) in vectors {
+            XCTAssertEqual(TLVProtocol.maskCardNumbersInText(input), expected, input)
+        }
+        // Tab and non-breaking space separate; two separators in a row do not
+        XCTAssertEqual(TLVProtocol.maskCardNumbersInText("5167\t9400\t0012\t3315"), "5167\t94**\t****\t3315")
+        XCTAssertEqual(TLVProtocol.maskCardNumbersInText("5167\u{00A0}9400\u{00A0}0012\u{00A0}3315"),
+                       "5167\u{00A0}94**\u{00A0}****\u{00A0}3315")
+        XCTAssertEqual(TLVProtocol.maskCardNumbersInText("516794  0000123315"), "516794  0000123315")
+        // Left alone: amounts, short runs, already-masked numbers; text around a run kept
+        for untouched in ["1 250,00 MAD", "123456789012", "STAN: 514135", "Autorisation: 820085",
+                          "516794******3315"] {
             XCTAssertEqual(TLVProtocol.maskCardNumbersInText(untouched), untouched)
         }
+        XCTAssertEqual(TLVProtocol.maskCardNumbersInText("Ref " + Self.pan19), "Ref 601234*********4567")
+
+        // Tag 007: first 6 + '*' + last 4, whatever the grouping
         XCTAssertEqual(TLVProtocol.maskCardNumber(Self.pan), "516794******3315")
+        XCTAssertEqual(TLVProtocol.maskCardNumber("5167 9400 0012 3315"), "516794******3315")
+        XCTAssertEqual(TLVProtocol.maskCardNumber("5167-9400-0012-3315"), "516794******3315")
+        XCTAssertEqual(TLVProtocol.maskCardNumber("516794******3315"), "516794******3315")
+        XCTAssertEqual(TLVProtocol.parse(TLVProtocol.maskFrame(f("001", "101") + f("007", "5167 9400 0012 3315")
+            + f("013", "000")))[TLVProtocol.Tags.NCAR], "516794******3315")   // length field rewritten
     }
 
     func testFullPanNeverLeavesTheParser() async throws {

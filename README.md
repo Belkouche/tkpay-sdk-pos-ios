@@ -371,16 +371,24 @@ in place of "DEBIT".
 
 **Card numbers.** Card numbers are masked (first 6 + last 4 digits, e.g.
 `516794******3315`) as soon as the terminal's reply is read, and the full number is
-never exposed or logged. This covers the card number field (tag 007) and any card
-number of 13 to 19 digits, grouped or not by spaces or dashes, in receipt lines. Only
-the digits change, so receipt lines keep their exact content and length. Results,
+never exposed or logged.
+
+- The card number field (tag 007) is always returned as first 6 digits, `*` for
+  each middle digit, last 4 digits (`516794******3315`), whatever grouping it
+  arrived in.
+- In receipt lines and other text, any run of 13 or more digits is masked. Within a
+  run, digits are adjacent or separated by exactly one space, dash, dot, tab or
+  non-breaking space. Every digit except the first 6 and last 4 of the run becomes
+  `*`; separators stay, so lines keep their exact layout and length. Dates and times
+  (`07/11/2026 00:12:10`), amounts (`10.00`, `1 250,00`), STAN, terminal and
+  authorisation numbers, and shorter runs are left alone. Results,
 receipts, `receiptText`, error messages, the gateway notification and the reply
 returned by `NapsConnection.sendAndReceive` all carry the masked number. The SDK does
 not log frames. The helpers are public:
 
 ```swift
-TLVProtocol.maskCardNumber("5167940123453315")                 // "516794******3315"
-TLVProtocol.maskCardNumbersInText("Carte 5167 9400 1234 5331") // "Carte 5167 94** **** 5331"
+TLVProtocol.maskCardNumber("5167 9400 0012 3315")               // "516794******3315"
+TLVProtocol.maskCardNumbersInText("Carte 5167.9400.0012.3315") // "Carte 5167.94**.****.3315"
 ```
 
 **Response codes.** The CR field (tag 013) is in `responseCode`. The full spec §6 table

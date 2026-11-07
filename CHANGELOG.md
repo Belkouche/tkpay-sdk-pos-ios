@@ -33,8 +33,13 @@ Sync with NapsPay v5.4.4 / canonical C# SDK (TKPay.Naps 1.4.0).
   Responses larger than 64 KB are rejected.
 - **Card numbers.** Card numbers are masked (first 6 + last 4 digits) as soon as the
   reply is read, and the full number is never exposed or logged:
-  - receipt text masks card numbers of 13 to 19 digits, including ones grouped by
-    spaces or dashes (previously only 16 contiguous digits), changing only the digits;
+  - tag 007 is always returned as first 6 + `*` + last 4 digits, whatever grouping it
+    arrived in;
+  - receipt and other text mask every run of 13 or more digits whose digits are
+    adjacent or separated by exactly one space, dash, dot, tab or non-breaking space
+    (previously only 16 contiguous digits). All digits but the first 6 and last 4 of
+    the run become `*`, separators and layout are kept, and runs longer than 19
+    digits are masked too. Dates, times and amounts are left alone;
   - the DP block is masked line by line when the reply is parsed, so
     `TotalsResult.receiptText` and `ReferencingResult.receiptText` no longer leak a PAN
     that followed a sub-tag length header;

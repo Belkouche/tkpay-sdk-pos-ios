@@ -510,25 +510,22 @@ public enum TLVProtocol {
 
     // MARK: - Security
 
-    /// Mask a card number: keep the first 6 and last 4 digits, replace the others
-    /// with '*'. Spaces and dashes are kept, so the length never changes.
-    /// Example: 5167940123453315 -> 516794******3315
+    /// Mask a card number (tag 007): always returned as the first 6 digits, '*' for
+    /// each middle digit, and the last 4 digits, whatever grouping it arrived in.
+    /// Example: "5167 9400 0012 3315" -> "516794******3315". Already-masked digits
+    /// ('*') count as digits. Values with fewer than 10 digits are returned unchanged.
     public static func maskCardNumber(_ cardNumber: String) -> String {
-        let digitCount = cardNumber.filter { $0.isASCII && $0.isNumber }.count
-        guard digitCount >= 10 else { return cardNumber }
-
-        var seen = 0
-        return String(cardNumber.map { c -> Character in
-            guard c.isASCII && c.isNumber else { return c }
-            seen += 1
-            return seen <= 6 || seen > digitCount - 4 ? c : "*"
-        })
+        let digits = cardNumber.filter { ($0.isASCII && $0.isNumber) || $0 == "*" }
+        guard digits.count >= 10 else { return cardNumber }
+        return String(digits.prefix(6)) + String(repeating: "*", count: digits.count - 10) + String(digits.suffix(4))
     }
 
-    /// Mask every card number (13-19 digits, optionally grouped with single spaces or
-    /// dashes) in free text; the rest of the text is left unchanged.
+    /// Mask every card-shaped run in free text: 13 or more digits, consecutive digits
+    /// adjacent or separated by exactly one space, dash, dot, tab or non-breaking
+    /// space. Every digit except the first 6 and last 4 of the run becomes '*' (runs
+    /// longer than 19 digits too); separators and the rest of the text are unchanged.
     public static func maskCardNumbersInText(_ text: String) -> String {
-        let pattern = "(?<![0-9])[0-9](?:[ -]?[0-9]){12,18}(?![0-9])"
+        let pattern = #"(?<![0-9])[0-9](?:[ \-.\t\x{00A0}]?[0-9]){12,}(?![0-9])"#
         guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else {
             return text
         }
@@ -539,16 +536,26 @@ public enum TLVProtocol {
         let matches = regex.matches(in: text, options: [], range: range)
         for match in matches.reversed() {
             if let matchRange = Range(match.range, in: result) {
-                let cardNumber = String(result[matchRange])
-                result.replaceSubrange(matchRange, with: maskCardNumber(cardNumber))
+                result.replaceSubrange(matchRange, with: maskDigitsKeepingLayout(String(result[matchRange])))
             }
         }
 
         return result
     }
 
+    /// Replace every digit except the first 6 and last 4 with '*'; other characters stay.
+    private static func maskDigitsKeepingLayout(_ run: String) -> String {
+        let digitCount = run.filter { $0.isASCII && $0.isNumber }.count
+        var seen = 0
+        return String(run.map { c -> Character in
+            guard c.isASCII && c.isNumber else { return c }
+            seen += 1
+            return seen <= 6 || seen > digitCount - 4 ? c : "*"
+        })
+    }
+
     /// Mask card numbers in a raw reply frame: tag 007 (NCAR) and the text (033) of
-    /// each DP receipt line (tag 010). Masking keeps lengths, so the frame stays valid.
+    /// each DP receipt line (tag 010). Length fields are rewritten to match.
     public static func maskFrame(_ frame: String) -> String {
         return maskFields(frame) { tag, value in
             switch tag {
@@ -583,8 +590,8 @@ public enum TLVProtocol {
             guard let length = tlvLength(text[tagEnd..<lengthEnd]),
                   text.distance(from: lengthEnd, to: text.endIndex) >= length else { break }
             let valueEnd = text.index(lengthEnd, offsetBy: length)
-            result += text[index..<lengthEnd]
-            result += transform(String(text[index..<tagEnd]), String(text[lengthEnd..<valueEnd]))
+            let value = transform(String(text[index..<tagEnd]), String(text[lengthEnd..<valueEnd]))
+            result += text[index..<tagEnd] + String(format: "%03d", value.count) + value
             index = valueEnd
         }
         result += text[index...]
