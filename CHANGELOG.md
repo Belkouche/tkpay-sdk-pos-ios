@@ -31,8 +31,15 @@ Sync with NapsPay v5.4.4 / canonical C# SDK (TKPay.Naps 1.4.0).
 - **TLV length hardening.** Length fields must be exactly three ASCII digits; a
   signed length such as `-01` previously made the parser crash or the framer loop.
   Responses larger than 64 KB are rejected.
-- **PAN masking.** `ReferencingResult.receiptText` and `TotalsResult.receiptText`
-  mask card numbers like every other receipt path.
+- **Card numbers.** Card numbers are masked (first 6 + last 4 digits) as soon as the
+  reply is read, and the full number is never exposed or logged:
+  - receipt text masks card numbers of 13 to 19 digits, including ones grouped by
+    spaces or dashes (previously only 16 contiguous digits), changing only the digits;
+  - the DP block is masked line by line when the reply is parsed, so
+    `TotalsResult.receiptText` and `ReferencingResult.receiptText` no longer leak a PAN
+    that followed a sub-tag length header;
+  - `NapsConnection.sendAndReceive` returns the reply with card numbers masked
+    (`TLVProtocol.maskFrame`).
 
 ### Changed
 - Payment request (TM=001) sends DA/HE alongside DATR/HETR, matching the reference SDK.

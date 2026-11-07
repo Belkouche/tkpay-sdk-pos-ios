@@ -435,9 +435,11 @@ public enum TLVProtocol {
             let valueEnd = tlvString.index(lengthEnd, offsetBy: length)
             var value = String(tlvString[lengthEnd..<valueEnd])
 
-            // SECURITY: Immediately mask PAN in tag 007 (NCAR)
+            // Card numbers are masked as soon as they are parsed: NCAR and DP line text
             if tag == Tags.NCAR {
                 value = maskCardNumber(value)
+            } else if tag == Tags.DP {
+                value = maskReceiptData(value)
             }
 
             fields[tag] = value
@@ -508,21 +510,25 @@ public enum TLVProtocol {
 
     // MARK: - Security
 
-    /// Mask card number to show only first 6 and last 4 digits
+    /// Mask a card number: keep the first 6 and last 4 digits, replace the others
+    /// with '*'. Spaces and dashes are kept, so the length never changes.
     /// Example: 5167940123453315 -> 516794******3315
     public static func maskCardNumber(_ cardNumber: String) -> String {
-        guard cardNumber.count >= 10 else { return cardNumber }
+        let digitCount = cardNumber.filter { $0.isASCII && $0.isNumber }.count
+        guard digitCount >= 10 else { return cardNumber }
 
-        let first6 = String(cardNumber.prefix(6))
-        let last4 = String(cardNumber.suffix(4))
-        let masked = String(repeating: "*", count: cardNumber.count - 10)
-
-        return "\(first6)\(masked)\(last4)"
+        var seen = 0
+        return String(cardNumber.map { c -> Character in
+            guard c.isASCII && c.isNumber else { return c }
+            seen += 1
+            return seen <= 6 || seen > digitCount - 4 ? c : "*"
+        })
     }
 
-    /// Mask any 16-digit card numbers in text
+    /// Mask every card number (13-19 digits, optionally grouped with single spaces or
+    /// dashes) in free text; the rest of the text is left unchanged.
     public static func maskCardNumbersInText(_ text: String) -> String {
-        let pattern = "\\b\\d{16}\\b"
+        let pattern = "(?<![0-9])[0-9](?:[ -]?[0-9]){12,18}(?![0-9])"
         guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else {
             return text
         }
@@ -538,6 +544,50 @@ public enum TLVProtocol {
             }
         }
 
+        return result
+    }
+
+    /// Mask card numbers in a raw reply frame: tag 007 (NCAR) and the text (033) of
+    /// each DP receipt line (tag 010). Masking keeps lengths, so the frame stays valid.
+    public static func maskFrame(_ frame: String) -> String {
+        return maskFields(frame) { tag, value in
+            switch tag {
+            case Tags.NCAR: return maskCardNumber(value)
+            case Tags.DP: return maskReceiptData(value)
+            default: return value
+            }
+        }
+    }
+
+    /// Mask the line text (sub-tag 033) of a DP block, leaving its structure intact.
+    static func maskReceiptData(_ dp: String) -> String {
+        return maskFields(dp) { tag, value in
+            tag == ReceiptTags.content ? maskCardNumbersInText(value) : value
+        }
+    }
+
+    /// Walk TLV units (skipping '*' between them, stopping at '?'/'!' or malformed
+    /// data) and rewrite each value; everything not walked is copied unchanged.
+    private static func maskFields(_ text: String, _ transform: (String, String) -> String) -> String {
+        var result = ""
+        var index = text.startIndex
+        while index < text.endIndex {
+            if text[index] == "*" {
+                result.append("*")
+                index = text.index(after: index)
+                continue
+            }
+            guard text.distance(from: index, to: text.endIndex) >= 6 else { break }
+            let tagEnd = text.index(index, offsetBy: 3)
+            let lengthEnd = text.index(tagEnd, offsetBy: 3)
+            guard let length = tlvLength(text[tagEnd..<lengthEnd]),
+                  text.distance(from: lengthEnd, to: text.endIndex) >= length else { break }
+            let valueEnd = text.index(lengthEnd, offsetBy: length)
+            result += text[index..<lengthEnd]
+            result += transform(String(text[index..<tagEnd]), String(text[lengthEnd..<valueEnd]))
+            index = valueEnd
+        }
+        result += text[index...]
         return result
     }
 

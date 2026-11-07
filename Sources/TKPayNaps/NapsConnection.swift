@@ -101,7 +101,8 @@ public class NapsConnection {
             responseString.removeLast()
         }
 
-        return responseString
+        // Callers only ever see the reply with card numbers masked
+        return TLVProtocol.maskFrame(responseString)
     }
 
     /// End-of-message terminators: '!' (v2, NapsPay v5.4.4+) and '?' (v1). Both are

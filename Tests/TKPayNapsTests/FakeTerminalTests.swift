@@ -279,6 +279,120 @@ final class FakeTerminalTests: XCTestCase {
         }
     }
 
+    // MARK: - Card number masking
+
+    private static let pan = "5167940000123315"
+    private static let pan19 = "6012345678901234567"
+
+    /// Fails if `text` contains a full card number, with or without spaces/dashes.
+    private func assertNoFullPan(_ text: String, _ what: String, file: StaticString = #filePath, line: UInt = #line) {
+        let compact = text.replacingOccurrences(of: " ", with: "").replacingOccurrences(of: "-", with: "")
+        XCTAssertFalse(compact.contains(Self.pan), "full PAN in \(what): \(text)", file: file, line: line)
+        XCTAssertFalse(compact.contains(Self.pan19), "full 19-digit number in \(what): \(text)", file: file, line: line)
+    }
+
+    private final class CapturedOutput {
+        private let lock = NSLock()
+        private var data = Data()
+        func append(_ chunk: Data) { lock.lock(); data.append(chunk); lock.unlock() }
+        var text: String { lock.lock(); defer { lock.unlock() }; return String(decoding: data, as: UTF8.self) }
+    }
+
+    /// Captures everything written to stdout/stderr while `body` runs.
+    private func captureOutput(_ body: () async throws -> Void) async throws -> String {
+        let pipe = Pipe()
+        let savedOut = dup(STDOUT_FILENO), savedErr = dup(STDERR_FILENO)
+        let captured = CapturedOutput()
+        pipe.fileHandleForReading.readabilityHandler = { handle in
+            captured.append(handle.availableData)
+        }
+        fflush(stdout); fflush(stderr)
+        dup2(pipe.fileHandleForWriting.fileDescriptor, STDOUT_FILENO)
+        dup2(pipe.fileHandleForWriting.fileDescriptor, STDERR_FILENO)
+        defer {
+            fflush(stdout); fflush(stderr)
+            dup2(savedOut, STDOUT_FILENO); dup2(savedErr, STDERR_FILENO)
+            close(savedOut); close(savedErr)
+            pipe.fileHandleForReading.readabilityHandler = nil
+        }
+        try await body()
+        try await Task.sleep(nanoseconds: 2_000_000_000)   // let background logging finish
+        fflush(stdout); fflush(stderr)
+        try await Task.sleep(nanoseconds: 200_000_000)   // drain the pipe
+        return captured.text
+    }
+
+    private func dpLines(_ lines: [String]) -> String {
+        return lines.enumerated().map { i, text in
+            "030002" + String(format: "%02d", i) + "031001S032001G033" + String(format: "%03d", text.count) + text
+        }.joined(separator: "*")
+    }
+
+    func testMaskCardNumbersInTextCoversLengthsAndSeparators() {
+        XCTAssertEqual(TLVProtocol.maskCardNumbersInText("Carte 5167 9400 0012 3315 OK"), "Carte 5167 94** **** 3315 OK")
+        XCTAssertEqual(TLVProtocol.maskCardNumbersInText("5167-9400-0012-3315"), "5167-94**-****-3315")
+        XCTAssertEqual(TLVProtocol.maskCardNumbersInText("Ref " + Self.pan19), "Ref 601234*********4567")
+        XCTAssertEqual(TLVProtocol.maskCardNumbersInText("4111111111111"), "411111***1111")   // 13 digits
+        for untouched in ["Terminal: 00000001", "07/11/2026 00:12:10", "MONTANT: 10.00 MAD",
+                          "516794******3315", "123456789012", "12345678901234567890"] {
+            XCTAssertEqual(TLVProtocol.maskCardNumbersInText(untouched), untouched)
+        }
+        XCTAssertEqual(TLVProtocol.maskCardNumber(Self.pan), "516794******3315")
+    }
+
+    func testFullPanNeverLeavesTheParser() async throws {
+        let receiptText = ["TKpay", "VISA", Self.pan, "Carte 5167 9400 0012 3315", "Ref " + Self.pan19, "Copie Client"]
+        let maskedText = ["TKpay", "VISA", "516794******3315", "Carte 5167 94** **** 3315", "Ref 601234*********4567", "Copie Client"]
+        let phase1 = f("001", "101") + f("013", "000") + f("002", "1000") + f("007", Self.pan) + f("008", "654321")
+            + f("017", "3010") + f("010", dpLines(receiptText)) + "!"
+        let phase2 = f("001", "102") + f("013", "000") + f("007", Self.pan) + f("008", "654321") + f("009", "777777")
+            + f("010", dpLines(receiptText)) + "!"
+        let declined = f("001", "101") + f("013", "116") + f("007", Self.pan) + f("010", dpLines(receiptText)) + "!"
+        let totals = f("001", "110") + f("013", "000") + f("010", dpLines(receiptText)) + "!"
+
+        try await withTerminal([[phase1], [phase2], [declined], [totals], [phase1]]) { port, terminal in
+            let config = NapsConfig(host: "127.0.0.1", port: port, timeout: 10)
+            let client = NapsPayClient(config: config)
+            var dumps: [String] = []
+
+            let output = try await captureOutput {
+                print("capture-check")
+                let approved = try await client.processPayment(
+                    PaymentRequest(amount: 10, registerId: "01", cashierId: "00001"))
+                XCTAssertTrue(approved.isApproved, approved.error ?? "")
+                XCTAssertEqual(approved.maskedCardNumber, "516794******3315")
+                XCTAssertEqual(approved.merchantReceipt?.lines.map { $0.text }, maskedText)
+                XCTAssertEqual(approved.customerReceipt?.lines.map { $0.text }, maskedText)
+                dumps.append(String(reflecting: approved))
+
+                let decline = try await client.processPayment(
+                    PaymentRequest(amount: 10, registerId: "01", cashierId: "00001"))
+                XCTAssertFalse(decline.success)
+                XCTAssertEqual(decline.merchantReceipt?.lines.map { $0.text }, maskedText)
+                dumps.append(String(reflecting: decline))
+                dumps.append(decline.error ?? "")
+
+                let report = try await client.totals()
+                XCTAssertEqual(report.receipt?.lines.map { $0.text }, maskedText)
+                dumps.append(String(reflecting: report))
+
+                // The raw reply from the public connection API is masked too
+                let connection = NapsConnection(config: config)
+                try await connection.connect()
+                let raw = try await connection.sendAndReceive("001003001", timeout: 10)
+                connection.disconnect()
+                XCTAssertEqual(TLVProtocol.parse(raw)[TLVProtocol.Tags.NCAR], "516794******3315")
+                dumps.append(raw)
+            }
+
+            for (i, dump) in dumps.enumerated() { assertNoFullPan(dump, "result \(i)") }
+            for (i, request) in terminal.requests.enumerated() { assertNoFullPan(request, "request frame \(i)") }
+            XCTAssertEqual(TLVProtocol.parse(terminal.requests[1])[TLVProtocol.Tags.NCAR], "516794******3315")
+            XCTAssertTrue(output.contains("capture-check"), "output capture is not working")
+            assertNoFullPan(output, "captured stdout/stderr")
+        }
+    }
+
     func testRejectsInvalidSequenceLength() async {
         let client = NapsPayClient(config: NapsConfig(host: "127.0.0.1", port: 1))
         do {

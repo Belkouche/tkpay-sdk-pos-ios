@@ -294,7 +294,7 @@ try await client.resetPinPad()
 ## Receipts, PAN masking and response codes
 
 **Receipts.** The receipt is the DP block (tag 010) the terminal sends, in the
-layout certified for the interbank network (spec §5). Each line has four sub-tags:
+layout defined for the interbank network (spec §5). Each line has four sub-tags:
 
 | Sub-tag | Field | SDK |
 |---|---|---|
@@ -369,13 +369,18 @@ Copie Client
 The merchant copy ends with "Copie Commercant". The void copies have "ANNULATION"
 in place of "DEBIT".
 
-**PAN masking.** The card number (tag 007) is masked as soon as it is parsed: first 6
-and last 4 digits, e.g. `516794******3315`. Any 16-digit number in receipt lines and in
-`receiptText` is masked the same way. The helpers are public:
+**Card numbers.** Card numbers are masked (first 6 + last 4 digits, e.g.
+`516794******3315`) as soon as the terminal's reply is read, and the full number is
+never exposed or logged. This covers the card number field (tag 007) and any card
+number of 13 to 19 digits, grouped or not by spaces or dashes, in receipt lines. Only
+the digits change, so receipt lines keep their exact content and length. Results,
+receipts, `receiptText`, error messages, the gateway notification and the reply
+returned by `NapsConnection.sendAndReceive` all carry the masked number. The SDK does
+not log frames. The helpers are public:
 
 ```swift
-TLVProtocol.maskCardNumber("5167940123453315")             // "516794******3315"
-TLVProtocol.maskCardNumbersInText("Carte 5167940123453315") // "Carte 516794******3315"
+TLVProtocol.maskCardNumber("5167940123453315")                 // "516794******3315"
+TLVProtocol.maskCardNumbersInText("Carte 5167 9400 1234 5331") // "Carte 5167 94** **** 5331"
 ```
 
 **Response codes.** The CR field (tag 013) is in `responseCode`. The full spec §6 table
