@@ -71,14 +71,7 @@ public class NapsPayClient {
 
             if responseCode != "000" {
                 connection.disconnect()
-                let result = buildFailedResult(responseCode: responseCode, fields: paymentResponse)
-                // Send notification to gateway
-                GatewayNotifier.notifyTransaction(
-                    terminalHost: config.host,
-                    request: request,
-                    result: result
-                )
-                return result
+                return buildFailedResult(responseCode: responseCode, fields: paymentResponse)
             }
 
             // Get STAN for confirmation
@@ -111,26 +104,11 @@ public class NapsPayClient {
             }
             let confirmCode = confirmResponse[TLVProtocol.Tags.CR] ?? ""
             if confirmCode != "000" {
-                let result = buildFailedResult(responseCode: confirmCode, fields: confirmResponse)
-                GatewayNotifier.notifyTransaction(
-                    terminalHost: config.host,
-                    request: request,
-                    result: result
-                )
-                return result
+                return buildFailedResult(responseCode: confirmCode, fields: confirmResponse)
             }
 
             // Build successful result — merchant copy from Phase 1, customer copy from Phase 2
-            let result = buildSuccessResult(phase1Fields: paymentResponse, fields: confirmResponse)
-
-            // Send notification to gateway
-            GatewayNotifier.notifyTransaction(
-                terminalHost: config.host,
-                request: request,
-                result: result
-            )
-
-            return result
+            return buildSuccessResult(phase1Fields: paymentResponse, fields: confirmResponse)
 
         } catch {
             connection.disconnect()

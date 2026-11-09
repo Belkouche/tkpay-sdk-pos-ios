@@ -34,7 +34,7 @@ supported. The phone or tablet must be on the same network as the terminal.
 5. [Other operations](#other-operations)
 6. [Receipts, PAN masking and response codes](#receipts-pan-masking-and-response-codes)
 7. [Errors and timeouts](#errors-and-timeouts)
-8. [Transaction notifications](#transaction-notifications)
+8. [Network traffic](#network-traffic)
 9. [Testing with the emulator](#testing-with-the-emulator)
 10. [Troubleshooting](#troubleshooting)
 11. [Changelog](#changelog)
@@ -47,7 +47,7 @@ Swift Package Manager, in `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/Belkouche/tkpay-sdk-pos-naps-ios.git", from: "1.3.1")
+    .package(url: "https://github.com/Belkouche/tkpay-sdk-pos-naps-ios.git", from: "1.4.0")
 ]
 // and add "TKPayNaps" to your target's dependencies
 ```
@@ -382,7 +382,7 @@ never exposed or logged.
   `*`; separators stay, so lines keep their exact layout and length. Dates and times
   (`07/11/2026 00:12:10`), amounts (`10.00`, `1 250,00`), STAN, terminal and
   authorisation numbers, and shorter runs are left alone. Results,
-receipts, `receiptText`, error messages, the gateway notification and the reply
+receipts, `receiptText`, error messages and the reply
 returned by `NapsConnection.sendAndReceive` all carry the masked number. The SDK does
 not log frames. The helpers are public:
 
@@ -469,20 +469,9 @@ invalid (amount not positive, `registerId` not 2 characters, `cashierId` not 5,
 A timeout during phase 2 of a payment throws `.timeout`, but the terminal may already
 have authorised the card. Check with `duplicateReceipt()` before taking the payment again.
 
-## Transaction notifications
+## Network traffic
 
-After every payment the terminal answered (approved, declined or refused at
-confirmation), `processPayment` sends a JSON notification to
-the TKpay gateway (`POST https://api.tkpay.ma/v1/transactions/notify`). It runs in the
-background and never affects the payment result. It contains:
-
-- the terminal host, amount, currency, response code, STAN and authorisation number
-- the **masked** PAN, card expiry, entry mode and cardholder name
-- NCAI, register, cashier, sequence and transaction date/time
-- the SDK version, platform and a timestamp
-
-The URL is fixed and this cannot be turned off from the public API. Voids, settlement
-and the other operations send no notification.
+The SDK only talks to the terminal. It sends nothing to any server.
 
 ## Testing with the emulator
 

@@ -2,6 +2,11 @@
 
 All notable changes to the TKPay NAPS iOS SDK are documented here.
 
+## [1.4.0] - 2026-11-09
+
+- **Removed the gateway notification.** `processPayment` no longer sends a background
+  `POST` to `https://api.tkpay.ma` after each payment. The SDK only talks to the terminal.
+
 ## [1.3.1] - 2026-11-07
 
 - **Card numbers.** Card numbers are masked (first 6 + last 4 digits) as soon as the
