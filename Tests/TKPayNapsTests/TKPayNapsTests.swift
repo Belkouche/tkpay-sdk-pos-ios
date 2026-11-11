@@ -451,6 +451,44 @@ final class TKPayNapsTests: XCTestCase {
         XCTAssertEqual(TLVProtocol.parse("001003101010999" + exact + "013003000!")["013"], "000")
     }
 
+    func testDP999WithoutEndMarkerDoesNotSwallowFollowingFields() {
+        // Exactly 999 chars of sub-records, no '?': the walk must stop at tag 013 (not 03x)
+        let dp = "03000201031001S032001G033" + "971" + String(repeating: "x", count: 971)
+        XCTAssertEqual(dp.count, 999)
+        let frame = "001003101" + "010999" + dp + "013003000" + "0070165167940000123315!"
+
+        let fields = TLVProtocol.parse(frame)
+        XCTAssertEqual(fields["010"]?.count, 999)
+        XCTAssertEqual(fields["013"], "000")
+        XCTAssertEqual(fields["007"], "516794******3315")
+        XCTAssertTrue(NapsConnection.isCompleteMessage(Data(frame.utf8)))
+    }
+
+    func testReceiptMaskingCoversEverySubTagAndRemainder() {
+        let pan = "5167940000123315"
+        // PAN in a non-text sub-tag (031), in an unknown sub-tag (039) and in an unparseable tail
+        let dp = "03000201031016" + pan + "*030002020390164111111111111111*CARTE 6011000990139424?"
+        let masked = TLVProtocol.maskFrame("001003101" + TLVProtocol.buildField(tag: "010", value: dp) + "!")
+        XCTAssertFalse(masked.contains(pan), masked)
+        XCTAssertFalse(masked.contains("4111111111111111"), masked)
+        XCTAssertFalse(masked.contains("6011000990139424"), masked)
+        XCTAssertTrue(masked.contains("516794******3315"))
+        XCTAssertTrue(masked.contains("CARTE 601100******9424?"))
+
+        let parsed = TLVProtocol.parse("001003101" + TLVProtocol.buildField(tag: "010", value: dp) + "!")
+        XCTAssertFalse(parsed["010"]?.contains(pan) ?? true)
+        XCTAssertFalse(parsed["010"]?.contains("6011000990139424") ?? true)
+        XCTAssertEqual(parsed["010"]?.count, dp.count)
+    }
+
+    func testMaskFrameMasksCardNumbersAfterTheWalkStops() {
+        // The walk breaks at the malformed header "01X"; the rest is masked as text
+        let masked = TLVProtocol.maskFrame("001003101" + "01X0165167940000123315" + "!007016 4111111111111111")
+        XCTAssertFalse(masked.contains("5167940000123315"), masked)
+        XCTAssertFalse(masked.contains("4111111111111111"), masked)
+        XCTAssertTrue(masked.hasPrefix("001003101"))
+    }
+
     func testParseKeepsFieldsAfterTerminatorsInsideReceipt() {
         let dp = "03000201031001S032001C033006Merci!*03000202031001S032001G033010A bientot??"
         let frame = "001003102" + TLVProtocol.buildField(tag: "010", value: dp) + "013003000" + "008006222222!"

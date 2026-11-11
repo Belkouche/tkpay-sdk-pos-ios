@@ -478,7 +478,9 @@ public enum TLVProtocol {
     /// The Ingenico Lane3600 writes 999 as the DP length when the receipt is longer (a
     /// duplicate holding both copies is ~2,150 chars), so a DP declared 999 long ends at
     /// its own '?' end marker, found by walking its sub-records (3-digit sub-tag, 3-digit
-    /// length, value) and '*' line separators. The '?' is part of the DP value.
+    /// length, value) and '*' line separators. The '?' is part of the DP value. Only
+    /// receipt sub-tags (030-039) are walked: at the first other tag the declared end is
+    /// returned, so a DP exactly 999 long without '?' never swallows the fields after it.
     static func fieldEnd(_ chars: [Character], _ pos: Int) -> Int? {
         guard asciiNumber(chars, pos, 3) != nil, let length = asciiNumber(chars, pos + 3, 3) else { return nil }
         let declaredEnd = pos + 6 + length
@@ -488,7 +490,8 @@ public enum TLVProtocol {
             if chars[i] == "*" { i += 1; continue }
             if chars[i] == "?" { return max(i + 1, declaredEnd) }
             guard i + 6 <= chars.count else { return chars.count + 1 }   // rest not received yet
-            guard asciiNumber(chars, i, 3) != nil, let subLength = asciiNumber(chars, i + 3, 3) else {
+            guard chars[i] == "0", chars[i + 1] == "3", asciiNumber(chars, i, 3) != nil,
+                  let subLength = asciiNumber(chars, i + 3, 3) else {
                 return declaredEnd
             }
             i += 6 + subLength
@@ -624,17 +627,18 @@ public enum TLVProtocol {
         }
     }
 
-    /// Mask the line text (sub-tag 033) of a DP block, leaving its structure intact.
+    /// Mask card numbers in every sub-tag value of a DP block, and in any part that cannot
+    /// be walked as sub-records, leaving its structure intact.
     static func maskReceiptData(_ dp: String) -> String {
-        return maskFields(dp) { tag, value in
-            tag == ReceiptTags.content ? maskCardNumbersInText(value) : value
+        return maskFields(dp) { _, value in
+            maskCardNumbersInText(value)
         }
     }
 
     /// Walk TLV units (skipping '*' between them, stopping at '?'/'!' or malformed
-    /// data) and rewrite each value; everything not walked is copied unchanged. A length
-    /// header is kept as sent when the value length is unchanged (a DP declared 999 that
-    /// runs to its end marker keeps "999").
+    /// data) and rewrite each value. A length header is kept as sent when the value length
+    /// is unchanged (a DP declared 999 that runs to its end marker keeps "999"). Fails
+    /// closed: card numbers in any part that is not walked as a field are masked as text.
     private static func maskFields(_ text: String, _ transform: (String, String) -> String) -> String {
         let chars = Array(text)
         var result = ""
@@ -654,7 +658,7 @@ public enum TLVProtocol {
             result += tag + header + value
             pos = end
         }
-        result += String(chars[pos...])
+        result += maskCardNumbersInText(String(chars[pos...]))
         return result
     }
 
