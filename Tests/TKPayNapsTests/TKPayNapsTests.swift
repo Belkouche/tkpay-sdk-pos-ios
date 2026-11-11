@@ -412,6 +412,67 @@ final class TKPayNapsTests: XCTestCase {
         XCTAssertEqual(TLVProtocol.parseReceipt("030-01X", type: .merchant).lines.map { $0.text }, [])
     }
 
+    /// A DP block of `count` receipt lines, each "LINE nn" padded to 40 chars, with an
+    /// optional extra line; lines are '*'-separated and the block ends with '?'.
+    private func longDP(lines count: Int, extra: String? = nil) -> String {
+        var texts = (1...count).map { "LINE \(String(format: "%02d", $0))".padding(toLength: 40, withPad: " ", startingAt: 0) }
+        if let extra = extra { texts.append(extra) }
+        return texts.enumerated().map { i, text in
+            "030002" + String(format: "%02d", (i % 99) + 1) + "031001S032001G033" + String(format: "%03d", text.count) + text
+        }.joined(separator: "*") + "?"
+    }
+
+    func testParseDPDeclared999RunsToItsEndMarker() {
+        // Lane3600: a receipt longer than 999 chars is sent with length 999
+        let dp = longDP(lines: 30, extra: "CARTE 5167940000123315")
+        XCTAssertGreaterThan(dp.count, 999)
+        let frame = "001003108" + "010999" + dp + "013003000" + "008006123456!"
+
+        let fields = TLVProtocol.parse(frame)
+        XCTAssertEqual(fields["001"], "108")
+        XCTAssertEqual(fields["013"], "000")
+        XCTAssertEqual(fields["008"], "123456")
+        let parsedDP = try! XCTUnwrap(fields["010"])
+        XCTAssertEqual(parsedDP.count, dp.count)          // whole block, '?' included
+        XCTAssertTrue(parsedDP.hasSuffix("?"))
+        let lines = TLVProtocol.parseReceipt(parsedDP, type: .merchant).lines.map { $0.text }
+        XCTAssertEqual(lines.count, 31)
+        XCTAssertEqual(lines.last, "CARTE 516794******3315")   // masked past the 999th char
+
+        // maskFrame masks past the 999th char too and keeps the "999" header
+        let masked = TLVProtocol.maskFrame(frame)
+        XCTAssertTrue(masked.hasPrefix("001003108010999"))
+        XCTAssertFalse(masked.contains("5167940000123315"))
+        XCTAssertEqual(TLVProtocol.parse(masked)["013"], "000")
+
+        // A DP declared 999 that is really 999 long (its '?' is the 999th char)
+        let exact = "033992" + String(repeating: "x", count: 992) + "?"
+        XCTAssertEqual(TLVProtocol.parse("001003101010999" + exact + "013003000!")["013"], "000")
+    }
+
+    func testParseKeepsFieldsAfterTerminatorsInsideReceipt() {
+        let dp = "03000201031001S032001C033006Merci!*03000202031001S032001G033010A bientot??"
+        let frame = "001003102" + TLVProtocol.buildField(tag: "010", value: dp) + "013003000" + "008006222222!"
+        let fields = TLVProtocol.parse(frame)
+        XCTAssertEqual(fields["013"], "000")
+        XCTAssertEqual(fields["008"], "222222")
+        XCTAssertEqual(TLVProtocol.parseReceipt(fields["010"] ?? "", type: .customer).lines.map { $0.text },
+                       ["Merci!", "A bientot?"])
+    }
+
+    func testNonAsciiDigitsInHeadersStopTheWalkWithoutThrowing() {
+        // Arabic-Indic, fullwidth and superscript digits are not header digits
+        XCTAssertEqual(TLVProtocol.parse("001003101013\u{0660}\u{0660}\u{0663}000!"), ["001": "101"])
+        XCTAssertEqual(TLVProtocol.parse("001003101013\u{FF10}\u{FF10}\u{FF13}000!"), ["001": "101"])
+        XCTAssertEqual(TLVProtocol.parse("001003101\u{0660}13003000!"), ["001": "101"])
+        XCTAssertEqual(TLVProtocol.parse("001003101013\u{00B9}23000!"), ["001": "101"])
+        XCTAssertEqual(TLVProtocol.parse(""), [:])
+        XCTAssertEqual(TLVProtocol.parse("010999030002"), [:])   // truncated DP 999: nothing, no crash
+        XCTAssertEqual(TLVProtocol.parse("010999030\u{0660}02xx"), [:])
+        XCTAssertEqual(TLVProtocol.maskFrame("001003101013\u{0660}\u{0660}\u{0663}000"),
+                       "001003101013\u{0660}\u{0660}\u{0663}000")
+    }
+
     func testTerminatorDetection() {
         XCTAssertTrue(NapsConnection.endsWithTerminator(Data("001003101!".utf8)))
         XCTAssertTrue(NapsConnection.endsWithTerminator(Data("001003101?".utf8)))

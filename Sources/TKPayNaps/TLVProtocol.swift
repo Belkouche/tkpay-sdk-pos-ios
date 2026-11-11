@@ -424,35 +424,20 @@ public enum TLVProtocol {
 
     /// Parse TLV string into fields dictionary.
     ///
-    /// Parsing stops at the first end-of-message terminator (`!` for v2, `?` for v1)
-    /// so any receipt content or noise after it is ignored. Both terminators are
-    /// accepted so the parser is protocol-version agnostic.
+    /// Fields are walked by their length, so a terminator ('!' v2, '?' v1) inside a value
+    /// (receipt text, the DP '?' end marker) is data; one where the next field would start
+    /// ends the frame, and anything after it is ignored. Malformed data stops the walk.
     public static func parse(_ tlvString: String) -> [String: String] {
         var fields: [String: String] = [:]
+        let chars = Array(tlvString)
+        var pos = 0
 
-        var index = tlvString.startIndex
+        while pos + 6 <= chars.count {
+            if chars[pos] == "!" || chars[pos] == "?" { break }
+            guard let end = fieldEnd(chars, pos), end <= chars.count else { break }
 
-        while index < tlvString.endIndex {
-            // A terminator ('!' v2, '?' v1) ends the frame only between fields; inside
-            // a value (e.g. the DP '?' end marker, "Merci!") it is data.
-            if tlvString[index] == "!" || tlvString[index] == "?" { break }
-            // Need at least 6 chars for tag + length
-            guard tlvString.distance(from: index, to: tlvString.endIndex) >= 6 else { break }
-
-            let tagEnd = tlvString.index(index, offsetBy: 3)
-            let tag = String(tlvString[index..<tagEnd])
-
-            let lengthEnd = tlvString.index(tagEnd, offsetBy: 3)
-            let lengthStr = String(tlvString[tagEnd..<lengthEnd])
-
-            // Validate length is numeric
-            guard let length = tlvLength(lengthStr) else { break }
-
-            // Check if we have enough data for the value
-            guard tlvString.distance(from: lengthEnd, to: tlvString.endIndex) >= length else { break }
-
-            let valueEnd = tlvString.index(lengthEnd, offsetBy: length)
-            var value = String(tlvString[lengthEnd..<valueEnd])
+            let tag = String(chars[pos..<pos + 3])
+            var value = String(chars[pos + 6..<end])
 
             // Card numbers are masked as soon as they are parsed: NCAR and DP line text
             if tag == Tags.NCAR {
@@ -462,10 +447,46 @@ public enum TLVProtocol {
             }
 
             fields[tag] = value
-            index = valueEnd
+            pos = end
         }
 
         return fields
+    }
+
+    /// End offset (exclusive) of the field starting at `pos`, or nil when its header is
+    /// not 3 + 3 ASCII digits. The result can be past `chars.count` when the field is not
+    /// fully received yet.
+    ///
+    /// The Ingenico Lane3600 writes 999 as the DP length when the receipt is longer (a
+    /// duplicate holding both copies is ~2,150 chars), so a DP declared 999 long ends at
+    /// its own '?' end marker, found by walking its sub-records (3-digit sub-tag, 3-digit
+    /// length, value) and '*' line separators. The '?' is part of the DP value.
+    static func fieldEnd(_ chars: [Character], _ pos: Int) -> Int? {
+        guard asciiNumber(chars, pos, 3) != nil, let length = asciiNumber(chars, pos + 3, 3) else { return nil }
+        let declaredEnd = pos + 6 + length
+        guard String(chars[pos..<pos + 3]) == Tags.DP, length == 999 else { return declaredEnd }
+        var i = pos + 6
+        while i < chars.count {
+            if chars[i] == "*" { i += 1; continue }
+            if chars[i] == "?" { return max(i + 1, declaredEnd) }
+            guard i + 6 <= chars.count else { return chars.count + 1 }   // rest not received yet
+            guard asciiNumber(chars, i, 3) != nil, let subLength = asciiNumber(chars, i + 3, 3) else {
+                return declaredEnd
+            }
+            i += 6 + subLength
+        }
+        return chars.count + 1
+    }
+
+    /// Value of `count` ASCII digits ('0'-'9') at `pos`, or nil (non-digit, or out of range).
+    private static func asciiNumber(_ chars: [Character], _ pos: Int, _ count: Int) -> Int? {
+        guard pos >= 0, pos + count <= chars.count else { return nil }
+        var value = 0
+        for c in chars[pos..<pos + count] {
+            guard let ascii = c.asciiValue, ascii >= 48, ascii <= 57 else { return nil }
+            value = value * 10 + Int(ascii - 48)
+        }
+        return value
     }
 
     // MARK: - Receipt Parsing
@@ -593,27 +614,29 @@ public enum TLVProtocol {
     }
 
     /// Walk TLV units (skipping '*' between them, stopping at '?'/'!' or malformed
-    /// data) and rewrite each value; everything not walked is copied unchanged.
+    /// data) and rewrite each value; everything not walked is copied unchanged. A length
+    /// header is kept as sent when the value length is unchanged (a DP declared 999 that
+    /// runs to its end marker keeps "999").
     private static func maskFields(_ text: String, _ transform: (String, String) -> String) -> String {
+        let chars = Array(text)
         var result = ""
-        var index = text.startIndex
-        while index < text.endIndex {
-            if text[index] == "*" {
+        var pos = 0
+        while pos < chars.count {
+            if chars[pos] == "*" {
                 result.append("*")
-                index = text.index(after: index)
+                pos += 1
                 continue
             }
-            guard text.distance(from: index, to: text.endIndex) >= 6 else { break }
-            let tagEnd = text.index(index, offsetBy: 3)
-            let lengthEnd = text.index(tagEnd, offsetBy: 3)
-            guard let length = tlvLength(text[tagEnd..<lengthEnd]),
-                  text.distance(from: lengthEnd, to: text.endIndex) >= length else { break }
-            let valueEnd = text.index(lengthEnd, offsetBy: length)
-            let value = transform(String(text[index..<tagEnd]), String(text[lengthEnd..<valueEnd]))
-            result += text[index..<tagEnd] + String(format: "%03d", value.count) + value
-            index = valueEnd
+            guard let end = fieldEnd(chars, pos), end <= chars.count else { break }
+            let tag = String(chars[pos..<pos + 3])
+            let original = String(chars[pos + 6..<end])
+            let value = transform(tag, original)
+            let header = value.count == original.count
+                ? String(chars[pos + 3..<pos + 6]) : String(format: "%03d", value.count)
+            result += tag + header + value
+            pos = end
         }
-        result += text[index...]
+        result += String(chars[pos...])
         return result
     }
 
