@@ -279,15 +279,15 @@ public class NapsPayClient {
                                   merchantReceipt: merchantReceipt, customerReceipt: customerReceipt)
     }
 
-    /// Network test / ping (TM=009). Verifies the terminal can reach the NAPS host.
+    /// Network test / ping (TM=009). Not supported over TCP: nothing is sent and the result
+    /// has `responseCode == "UNSUPPORTED"`. The NapsPay app on Sunmi terminals does not
+    /// implement TM=009 (it answers TM=101 with CR=902), and a test frame crashed the app on
+    /// a Sunmi P2. TM=009 is only answered over USB serial, which this SDK does not support.
     public func networkTest(registerId: String = "01", cashierId: String = "00001") async throws -> NetworkTestResult {
-        let fields = try await sendManagement(
-            TLVProtocol.buildNetworkTestRequest(ncai: registerId + cashierId, sequence: generateSequence()))
-        let rc = fields[TLVProtocol.Tags.CR] ?? ""
         return NetworkTestResult(
-            success: rc == "000",
-            responseCode: rc,
-            message: rc == "000" ? "Network OK" : TLVProtocol.describeResponse(rc)
+            success: false,
+            responseCode: "UNSUPPORTED",
+            message: "Network test not supported over TCP (the terminal's payment app does not implement TM 009)"
         )
     }
 

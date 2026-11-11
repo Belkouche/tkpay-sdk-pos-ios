@@ -234,6 +234,19 @@ final class FakeTerminalTests: XCTestCase {
         }
     }
 
+    func testNetworkTestIsUnsupportedOverTcpAndSendsNothing() async throws {
+        try await withTerminal([[f("001", "109") + f("013", "000") + "!"]]) { port, terminal in
+            let client = NapsPayClient(config: NapsConfig(host: "127.0.0.1", port: port, timeout: 10))
+            let result = try await client.networkTest()
+
+            XCTAssertFalse(result.success)
+            XCTAssertEqual(result.responseCode, "UNSUPPORTED")
+            XCTAssertTrue(result.message.contains("not supported over TCP"), result.message)
+            try await Task.sleep(nanoseconds: 300_000_000)
+            XCTAssertTrue(terminal.requests.isEmpty, "network test sent \(terminal.requests)")
+        }
+    }
+
     func testVoidIsPendingWhenTM104NeverArrives() async throws {
         let r103 = f("001", "103") + f("013", "000") + f("008", "111111") + f("010", dp("ANNULATION")) + "!"
         try await withTerminal([[r103]]) { port, _ in

@@ -63,8 +63,8 @@ final class EmulatorIntegrationTests: XCTestCase {
     func testNetworkTest() async throws {
         try requireMode("approve")
         let result = try await client.networkTest()
-        XCTAssertTrue(result.success, result.message)
-        XCTAssertEqual(result.message, "Network OK")
+        XCTAssertFalse(result.success)
+        XCTAssertEqual(result.responseCode, "UNSUPPORTED")
     }
 
     func testReferencing() async throws {
