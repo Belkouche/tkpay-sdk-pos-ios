@@ -251,10 +251,17 @@ public class NapsPayClient {
     /// Map a TM=104 reply (spec §4.4): CR=000/480 = void completed; CR=995 (seen with
     /// completed voids on live terminals) = pending, keeping the original STAN for a
     /// duplicate-receipt check; anything else = failed.
+    ///
+    /// When TM=103 carried no receipt (Ingenico Lane3600, Sunmi P2), the TM=104 receipt is
+    /// the only void receipt and is returned as the merchant copy, with no customer copy.
+    /// Otherwise TM=103 is the merchant copy and TM=104 the customer copy.
     private func cancellationOutcome(_ fields: [String: String], originalStan: String,
-                                     merchantReceipt: Receipt?) -> CancellationResult {
+                                     merchantReceipt tm103Receipt: Receipt?) -> CancellationResult {
         let cr = fields[TLVProtocol.Tags.CR] ?? ""
-        let customerReceipt = fields[TLVProtocol.Tags.DP].map { TLVProtocol.parseReceipt($0, type: .customer) }
+        let tm104Dp = fields[TLVProtocol.Tags.DP]
+        let merchantReceipt = tm103Receipt ?? tm104Dp.map { TLVProtocol.parseReceipt($0, type: .merchant) }
+        let customerReceipt = tm103Receipt == nil ? nil
+            : tm104Dp.map { TLVProtocol.parseReceipt($0, type: .customer) }
         if cr == "000" || cr == "480" {
             return CancellationResult(success: true, responseCode: cr,
                                       stan: fields[TLVProtocol.Tags.STAN] ?? originalStan, error: nil,

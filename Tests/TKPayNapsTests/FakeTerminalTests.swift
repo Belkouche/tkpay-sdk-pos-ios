@@ -217,6 +217,23 @@ final class FakeTerminalTests: XCTestCase {
         }
     }
 
+    func testVoidReceiptOnlyInTM104IsTheMerchantCopy() async throws {
+        // Lane3600 / Sunmi P2: TM 103 carries no receipt; TM 104 carries the only one
+        let r103 = f("001", "103") + f("013", "000") + f("002", "15000") + f("008", "111111") + "!"
+        let r104 = f("001", "104") + f("013", "000") + f("008", "222222")
+            + f("010", dp("ANNULATION Copie Commercant")) + "!"
+        try await withTerminal([[r103], [r104]]) { port, _ in
+            let client = NapsPayClient(config: NapsConfig(host: "127.0.0.1", port: port, timeout: 10))
+            let result = await client.cancelPayment(
+                stan: "111111", registerId: "01", cashierId: "00001", sequence: "000321", amountCentimes: 15000)
+
+            XCTAssertTrue(result.success, result.error ?? "")
+            XCTAssertEqual(result.merchantReceipt?.type, .merchant)
+            XCTAssertTrue(result.merchantReceipt?.toPlainText().contains("Copie Commercant") ?? false)
+            XCTAssertNil(result.customerReceipt)
+        }
+    }
+
     func testVoidIsPendingWhenTM104NeverArrives() async throws {
         let r103 = f("001", "103") + f("013", "000") + f("008", "111111") + f("010", dp("ANNULATION")) + "!"
         try await withTerminal([[r103]]) { port, _ in
@@ -285,7 +302,9 @@ final class FakeTerminalTests: XCTestCase {
                 stan: "111111", registerId: "01", cashierId: "00001", sequence: "000321", amountCentimes: 15000)
 
             XCTAssertTrue(result.success, result.error ?? "")
-            XCTAssertEqual(result.customerReceipt?.lines.map { $0.text }, ["ANNULATION", "Copie Client"])
+            // TM 103 had no receipt, so the TM 104 receipt is the merchant copy
+            XCTAssertEqual(result.merchantReceipt?.lines.map { $0.text }, ["ANNULATION", "Copie Client"])
+            XCTAssertNil(result.customerReceipt)
         }
     }
 
