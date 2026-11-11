@@ -157,6 +157,37 @@ final class FakeTerminalTests: XCTestCase {
         }
     }
 
+    func testReadDoesNotStopAtReceiptLineEndingWithQuestionMark() async throws {
+        let receipt = "03000201031001S032001C033010A bientot?*03000202031001S032001G033005Merci?"
+        let reply = f("001", "104") + f("013", "000") + f("010", receipt) + f("008", "222222")
+        let split = reply.range(of: "bientot?")!.upperBound   // chunk ends on a line's '?'
+        try await withTerminal([[String(reply[..<split]), String(reply[split...]) + "!"]]) { port, _ in
+            let connection = NapsConnection(config: NapsConfig(host: "127.0.0.1", port: port, timeout: 10))
+            try await connection.connect()
+            defer { connection.disconnect() }
+
+            let response = try await connection.sendAndReceive("001003010", timeout: 10)
+            XCTAssertEqual(response, reply)
+            XCTAssertEqual(TLVProtocol.parse(response)[TLVProtocol.Tags.STAN], "222222")
+        }
+    }
+
+    func testReplyOver64KBFailsAsInvalidResponse() async throws {
+        let huge = String(repeating: "x", count: 70 * 1024)
+        try await withTerminal([[huge]]) { port, _ in
+            let connection = NapsConnection(config: NapsConfig(host: "127.0.0.1", port: port, timeout: 10))
+            try await connection.connect()
+            defer { connection.disconnect() }
+
+            do {
+                _ = try await connection.sendAndReceive("001003010", timeout: 10)
+                XCTFail("a reply over 64 KB must fail")
+            } catch let error as NapsError {
+                XCTAssertEqual(error.code, .invalidResponse, error.message)
+            }
+        }
+    }
+
     func testRejectedConfirmationIsNotApproved() async throws {
         let phase1 = f("001", "101") + f("013", "000") + f("008", "654321") + "!"
         let phase2 = f("001", "102") + f("013", "307") + f("008", "654321") + "!"

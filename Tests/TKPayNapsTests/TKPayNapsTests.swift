@@ -404,7 +404,8 @@ final class TKPayNapsTests: XCTestCase {
         XCTAssertNil(TLVProtocol.tlvLength("1a3"))
         XCTAssertEqual(TLVProtocol.tlvLength("012"), 12)
 
-        XCTAssertFalse(NapsConnection.endsWithTerminator(Data("001-01X!".utf8)))
+        // Data that stops being TLV falls back to "ends with '!' or '?'"
+        XCTAssertTrue(NapsConnection.isCompleteMessage(Data("001-01X!".utf8)))
         XCTAssertEqual(TLVProtocol.parse("001003101013-01X!"), ["001": "101"])
         // Terminators inside values are data; one between fields ends the frame
         XCTAssertEqual(TLVProtocol.parse("001003101010006Merci?013003000!008006999999"),
@@ -473,14 +474,38 @@ final class TKPayNapsTests: XCTestCase {
                        "001003101013\u{0660}\u{0660}\u{0663}000")
     }
 
+    func testCompleteMessageNeedsTerminatorOnFieldBoundary() {
+        let dp = "03000201031001S032001C033006Merci!*03000202031001S032001G033010A bientot?*"
+            + "03000203031001S032001G033004Fin.?"
+        let reply = "001003104" + TLVProtocol.buildField(tag: "010", value: dp) + "013003000"
+        // A read that stops right after the '!' or the '?' ending a receipt line is not complete
+        for cut in ["Merci!", "A bientot?"] {
+            let partial = String(reply[..<reply.range(of: cut)!.upperBound])
+            XCTAssertFalse(NapsConnection.isCompleteMessage(Data(partial.utf8)), partial)
+        }
+        // Nor one that stops after the DP '?' end marker (the field boundary is past it)
+        let afterDP = String(reply[..<reply.range(of: "Fin.?")!.upperBound])
+        XCTAssertFalse(NapsConnection.isCompleteMessage(Data(afterDP.utf8)))
+        XCTAssertTrue(NapsConnection.isCompleteMessage(Data((reply + "!").utf8)))
+        XCTAssertTrue(NapsConnection.isCompleteMessage(Data((reply + "?").utf8)))
+
+        // DP declared 999: complete only after its own end marker and the frame terminator
+        let long = longDP(lines: 30)
+        let frame = "001003108" + "010999" + long + "013003000"
+        let lineCut = String(frame[..<frame.range(of: "LINE 25")!.upperBound])
+        XCTAssertFalse(NapsConnection.isCompleteMessage(Data((lineCut + "?").utf8)))
+        XCTAssertFalse(NapsConnection.isCompleteMessage(Data(("001003108010999" + long).utf8)))
+        XCTAssertTrue(NapsConnection.isCompleteMessage(Data((frame + "!").utf8)))
+    }
+
     func testTerminatorDetection() {
-        XCTAssertTrue(NapsConnection.endsWithTerminator(Data("001003101!".utf8)))
-        XCTAssertTrue(NapsConnection.endsWithTerminator(Data("001003101?".utf8)))
-        XCTAssertFalse(NapsConnection.endsWithTerminator(Data("001003101".utf8)))
-        XCTAssertFalse(NapsConnection.endsWithTerminator(Data()))
+        XCTAssertTrue(NapsConnection.isCompleteMessage(Data("001003101!".utf8)))
+        XCTAssertTrue(NapsConnection.isCompleteMessage(Data("001003101?".utf8)))
+        XCTAssertFalse(NapsConnection.isCompleteMessage(Data("001003101".utf8)))
+        XCTAssertFalse(NapsConnection.isCompleteMessage(Data()))
         // '!' inside a value, or at the end of a partial chunk, is not end-of-message
-        XCTAssertFalse(NapsConnection.endsWithTerminator(Data("033010Merci!".utf8)))
-        XCTAssertTrue(NapsConnection.endsWithTerminator(Data("033006Merci!!".utf8)))
-        XCTAssertFalse(NapsConnection.endsWithTerminator(Data("033006Merci!013003000!".utf8).dropLast(4)))
+        XCTAssertFalse(NapsConnection.isCompleteMessage(Data("033010Merci!".utf8)))
+        XCTAssertTrue(NapsConnection.isCompleteMessage(Data("033006Merci!!".utf8)))
+        XCTAssertFalse(NapsConnection.isCompleteMessage(Data("033006Merci!013003000!".utf8).dropLast(4)))
     }
 }

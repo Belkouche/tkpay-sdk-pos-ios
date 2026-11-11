@@ -453,6 +453,24 @@ public enum TLVProtocol {
         return fields
     }
 
+    /// True once `text` holds a complete reply: walking its fields by their length lands on a
+    /// '!' / '?' terminator. A terminator inside a value (receipt lines end with '?') is data,
+    /// so a read that happens to stop right after one is not taken as the end. If the data
+    /// stops being TLV, a trailing terminator is accepted as the end.
+    static func isCompleteMessage(_ text: String) -> Bool {
+        let chars = Array(text)
+        var pos = 0
+        while pos < chars.count {
+            if chars[pos] == "!" || chars[pos] == "?" { return true }
+            guard pos + 6 <= chars.count else { return false }
+            guard let end = fieldEnd(chars, pos) else {
+                return chars.last == "!" || chars.last == "?"
+            }
+            pos = end
+        }
+        return false
+    }
+
     /// End offset (exclusive) of the field starting at `pos`, or nil when its header is
     /// not 3 + 3 ASCII digits. The result can be past `chars.count` when the field is not
     /// fully received yet.
