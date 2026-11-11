@@ -283,50 +283,69 @@ public enum TLVProtocol {
         return msg
     }
 
-    /// Build cancellation request TLV (TM=003)
+    /// Build cancellation request TLV (TM=003) — Phase 1 of a void (spec v2 §4.3).
     ///
-    /// NapsPay v5.4.4+ requires the original amount (TAG 002) in the frame.
-    /// Pass `amountCentimes` when targeting v5.4.4+.
+    /// Fields and order: TM, NCAI, NS, DA, HE, DATR, HETR, STAN, [MT], [NSA].
+    /// - `ns`: a new sequence number for the void itself; TM=004 repeats it.
+    /// - `sequence`: the NS of the payment being voided, sent as NSA (005); omitted when nil or empty.
+    /// - `amountCentimes`: the original amount — NapsPay v5.4.4+ requires it.
     public static func buildCancellationRequest(
         stan: String,
         ncai: String,
-        sequence: String,
+        ns: String,
+        sequence: String? = nil,
         amountCentimes: Int? = nil
     ) -> String {
         let dateTime = getCurrentDateTime()
         var msg = buildField(tag: Tags.TM, value: MessageTypes.cancellationRequest)
+            + buildField(tag: Tags.NCAI, value: ncai)
+            + buildField(tag: Tags.NS, value: ns)
+            + buildField(tag: Tags.DA, value: dateTime.date)
+            + buildField(tag: Tags.HE, value: dateTime.time)
+            + buildField(tag: Tags.DATR, value: dateTime.date)
+            + buildField(tag: Tags.HETR, value: dateTime.time)
+            + buildField(tag: Tags.STAN, value: stan)
         if let amount = amountCentimes {
             msg += buildField(tag: Tags.MT, value: String(amount))
         }
-        msg += buildField(tag: Tags.STAN, value: stan)
-            + buildField(tag: Tags.NCAI, value: ncai)
-            + buildField(tag: Tags.NSA, value: sequence)
-            + buildField(tag: Tags.DA, value: dateTime.date)
-            + buildField(tag: Tags.HE, value: dateTime.time)
+        if let sequence = sequence, !sequence.isEmpty {
+            msg += buildField(tag: Tags.NSA, value: sequence)
+        }
         return msg
     }
 
-    /// Build cancellation confirmation request TLV (TM=004)
+    /// Build cancellation confirmation request TLV (TM=004) — Phase 2 of a void (spec v2 §4.4).
     ///
-    /// Sent on the same connection after receiving MT=103 from TM=003. Per spec §4.4
-    /// the sequence goes in NS (004) with the same value as the TM=003 it confirms
-    /// (verified on a live v5.4.4 terminal). `amount` must echo the amount (TAG 002, 12-digit) from the MT=103
-    /// response — omitting it is refused with CR=909 on NapsPay v5.4.4+.
+    /// Sent on the same connection after MT=103 CR=000; it executes the reversal.
+    /// Fields and order: TM, NCAI, NS, STAN, [MT, DE], [DATR], [HETR], DA, HE. No NSA.
+    /// - `sequence`: the NS of the TM=003 being confirmed.
+    /// - `amount`, `currency`, `datr`, `hetr`: echoed from MT=103. Omitting the amount is
+    ///   refused with CR=909 on NapsPay v5.4.4+; DE defaults to "504" when absent.
     public static func buildCancellationConfirmation(
         stan: String,
         ncai: String,
         sequence: String,
-        amount: String? = nil
+        amount: String? = nil,
+        currency: String? = nil,
+        datr: String? = nil,
+        hetr: String? = nil
     ) -> String {
         let dateTime = getCurrentDateTime()
         var msg = buildField(tag: Tags.TM, value: MessageTypes.cancellationConfirmationRequest)
-        if let amount = amount {
-            msg += buildField(tag: Tags.MT, value: amount)
-        }
-        msg += buildField(tag: Tags.STAN, value: stan)
             + buildField(tag: Tags.NCAI, value: ncai)
             + buildField(tag: Tags.NS, value: sequence)
-            + buildField(tag: Tags.DA, value: dateTime.date)
+            + buildField(tag: Tags.STAN, value: stan)
+        if let amount = amount, !amount.isEmpty {
+            msg += buildField(tag: Tags.MT, value: amount)
+            msg += buildField(tag: Tags.DE, value: (currency?.isEmpty ?? true) ? Currency.MAD : currency!)
+        }
+        if let datr = datr, !datr.isEmpty {
+            msg += buildField(tag: Tags.DATR, value: datr)
+        }
+        if let hetr = hetr, !hetr.isEmpty {
+            msg += buildField(tag: Tags.HETR, value: hetr)
+        }
+        msg += buildField(tag: Tags.DA, value: dateTime.date)
             + buildField(tag: Tags.HE, value: dateTime.time)
         return msg
     }

@@ -198,11 +198,21 @@ final class FakeTerminalTests: XCTestCase {
             XCTAssertTrue(result.customerReceipt?.toPlainText().contains("Copie Client") ?? false)
 
             XCTAssertEqual(terminal.requests.count, 2)
+            let request = TLVProtocol.parse(terminal.requests[0])
+            XCTAssertEqual(request[TLVProtocol.Tags.TM], "003")
+            XCTAssertEqual(request[TLVProtocol.Tags.NSA], "000321")   // the payment's sequence
+            let voidNS = try XCTUnwrap(request[TLVProtocol.Tags.NS])   // a new sequence for the void
+            XCTAssertNotEqual(voidNS, "000321")
             let confirm = TLVProtocol.parse(terminal.requests[1])
             XCTAssertEqual(confirm[TLVProtocol.Tags.TM], "004")
             XCTAssertEqual(confirm[TLVProtocol.Tags.MT], "15000")
-            XCTAssertEqual(confirm[TLVProtocol.Tags.NS], "000321")   // same sequence as TM=003
+            XCTAssertEqual(confirm[TLVProtocol.Tags.DE], "504")
+            XCTAssertEqual(confirm[TLVProtocol.Tags.NS], voidNS)   // same NS as TM=003
             XCTAssertNil(confirm[TLVProtocol.Tags.NSA])
+            // TCP requests carry no '!' / '?' terminator
+            for frame in terminal.requests {
+                XCTAssertFalse(frame.hasSuffix("!") || frame.hasSuffix("?"), frame)
+            }
             XCTAssertFalse(result.pending)
         }
     }

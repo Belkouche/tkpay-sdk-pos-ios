@@ -333,16 +333,61 @@ final class TKPayNapsTests: XCTestCase {
         XCTAssertEqual(receipt.lines.last?.alignment, .left)
     }
 
-    func testCancellationConfirmationCarriesSequenceInNS() {
-        let fields = TLVProtocol.parse(TLVProtocol.buildCancellationConfirmation(
-            stan: "123456", ncai: "0100001", sequence: "000321", amount: "15000"))
+    /// Tags of a request frame, in order.
+    private func tagOrder(_ frame: String) -> [String] {
+        var tags: [String] = []
+        var rest = Substring(frame)
+        while rest.count >= 6, let length = Int(rest.dropFirst(3).prefix(3)) {
+            tags.append(String(rest.prefix(3)))
+            rest = rest.dropFirst(6 + length)
+        }
+        return tags
+    }
 
-        // Spec §4.4: TM=004 NS (004) = NS of the TM=003 it confirms; amount echoed from TM=103
-        XCTAssertEqual(fields[TLVProtocol.Tags.TM], TLVProtocol.MessageTypes.cancellationConfirmationRequest)
-        XCTAssertEqual(fields[TLVProtocol.Tags.MT], "15000")
-        XCTAssertEqual(fields[TLVProtocol.Tags.STAN], "123456")
-        XCTAssertEqual(fields[TLVProtocol.Tags.NS], "000321")
-        XCTAssertNil(fields[TLVProtocol.Tags.NSA])
+    func testCancellationRequestFieldOrderAndSequences() {
+        let frame = TLVProtocol.buildCancellationRequest(
+            stan: "123456", ncai: "0100001", ns: "000042", sequence: "000321", amountCentimes: 15000)
+        let T = TLVProtocol.Tags.self
+
+        // Spec v2 §4.3: TM, NCAI, NS, DA, HE, DATR, HETR, STAN, MT, NSA
+        XCTAssertEqual(tagOrder(frame), [T.TM, T.NCAI, T.NS, T.DA, T.HE, T.DATR, T.HETR, T.STAN, T.MT, T.NSA])
+        let fields = TLVProtocol.parse(frame)
+        XCTAssertEqual(fields[T.TM], TLVProtocol.MessageTypes.cancellationRequest)
+        XCTAssertEqual(fields[T.NS], "000042")     // the void's own sequence
+        XCTAssertEqual(fields[T.NSA], "000321")    // the payment's sequence
+        XCTAssertEqual(fields[T.MT], "15000")
+        XCTAssertEqual(fields[T.DATR], fields[T.DA])
+        XCTAssertEqual(fields[T.HETR], fields[T.HE])
+        XCTAssertFalse(frame.hasSuffix("!") || frame.hasSuffix("?"))
+
+        // Without amount or payment sequence, MT and NSA are left out
+        let bare = TLVProtocol.buildCancellationRequest(stan: "123456", ncai: "0100001", ns: "000042")
+        XCTAssertEqual(tagOrder(bare), [T.TM, T.NCAI, T.NS, T.DA, T.HE, T.DATR, T.HETR, T.STAN])
+    }
+
+    func testCancellationConfirmationFieldOrder() {
+        let frame = TLVProtocol.buildCancellationConfirmation(
+            stan: "123456", ncai: "0100001", sequence: "000042", amount: "000000015000",
+            currency: "504", datr: "10112026", hetr: "101500")
+        let T = TLVProtocol.Tags.self
+
+        // Spec v2 §4.4: TM, NCAI, NS, STAN, MT, DE, DATR, HETR, DA, HE — never NSA
+        XCTAssertEqual(tagOrder(frame), [T.TM, T.NCAI, T.NS, T.STAN, T.MT, T.DE, T.DATR, T.HETR, T.DA, T.HE])
+        let fields = TLVProtocol.parse(frame)
+        XCTAssertEqual(fields[T.TM], TLVProtocol.MessageTypes.cancellationConfirmationRequest)
+        XCTAssertEqual(fields[T.NS], "000042")
+        XCTAssertEqual(fields[T.MT], "000000015000")   // echoed verbatim
+        XCTAssertEqual(fields[T.DATR], "10112026")
+        XCTAssertEqual(fields[T.HETR], "101500")
+        XCTAssertNil(fields[T.NSA])
+        XCTAssertFalse(frame.hasSuffix("!") || frame.hasSuffix("?"))
+
+        // DE defaults to 504 with an amount; no amount means no MT/DE; no DATR/HETR when absent
+        let noCurrency = TLVProtocol.parse(TLVProtocol.buildCancellationConfirmation(
+            stan: "123456", ncai: "0100001", sequence: "000042", amount: "15000"))
+        XCTAssertEqual(noCurrency[T.DE], "504")
+        let bare = TLVProtocol.buildCancellationConfirmation(stan: "123456", ncai: "0100001", sequence: "000042")
+        XCTAssertEqual(tagOrder(bare), [T.TM, T.NCAI, T.NS, T.STAN, T.DA, T.HE])
     }
 
     func testDuplicateReceiptRequestCanTargetStan() {
