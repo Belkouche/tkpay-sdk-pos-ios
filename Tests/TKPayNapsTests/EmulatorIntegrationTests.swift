@@ -50,7 +50,7 @@ final class EmulatorIntegrationTests: XCTestCase {
         // Merchant copy comes from Phase 1, customer copy from Phase 2.
         let merchant = try XCTUnwrap(result.merchantReceipt).toPlainText()
         let customer = try XCTUnwrap(result.customerReceipt).toPlainText()
-        XCTAssertTrue(merchant.contains("Copie Commercant"), merchant)
+        XCTAssertTrue(merchant.contains("Copie Commerçant"), merchant)
         XCTAssertTrue(customer.contains("Copie Client"), customer)
     }
 
@@ -107,8 +107,9 @@ final class EmulatorIntegrationTests: XCTestCase {
         XCTAssertEqual(result.responseCode, "000")
         XCTAssertNotNil(result.stan)
         XCTAssertNotEqual(result.stan, stan)   // void STAN from TM=104
-        XCTAssertTrue(result.merchantReceipt?.toPlainText().contains("Copie Commercant") ?? false)
-        XCTAssertTrue(result.customerReceipt?.toPlainText().contains("Copie Client") ?? false)
+        // Live terminals: TM 103 has no receipt; the TM 104 receipt is the merchant copy.
+        XCTAssertTrue(result.merchantReceipt?.toPlainText().contains("Copie Commerçant") ?? false)
+        XCTAssertNil(result.customerReceipt)
     }
 
     // MARK: - Receipts (spec §5: every DP line, in order, as sent)
@@ -148,13 +149,13 @@ final class EmulatorIntegrationTests: XCTestCase {
         let result = try await client.processPayment(
             PaymentRequest(amount: 10.00, registerId: "01", cashierId: "00001"))
         XCTAssertTrue(result.isApproved, result.error ?? "")
-        try assertEmulatorReceipt(result.merchantReceipt, stan: result.stan, label: "DEBIT", copy: "Copie Commercant")
+        try assertEmulatorReceipt(result.merchantReceipt, stan: result.stan, label: "DEBIT", copy: "Copie Commerçant")
         try assertEmulatorReceipt(result.customerReceipt, stan: result.stan, label: "DEBIT", copy: "Copie Client")
         print("--- payment merchant copy\n\(result.merchantReceipt!.toPlainText())")
         print("--- payment customer copy\n\(result.customerReceipt!.toPlainText())")
     }
 
-    func testVoidReceiptsBothCopies() async throws {
+    func testVoidReceiptMerchantCopyFromTm104() async throws {
         try requireMode("approve")
         let payment = try await client.processPayment(
             PaymentRequest(amount: 10.00, registerId: "01", cashierId: "00001"))
@@ -162,11 +163,10 @@ final class EmulatorIntegrationTests: XCTestCase {
         let result = await client.cancelPayment(
             stan: stan, registerId: "01", cashierId: "00001", sequence: "000322", amountCentimes: 1000)
         XCTAssertTrue(result.success, result.error ?? "")
-        // TM 103 copy shows the original STAN, TM 104 copy the void STAN
-        try assertEmulatorReceipt(result.merchantReceipt, stan: stan, label: "ANNULATION", copy: "Copie Commercant")
-        try assertEmulatorReceipt(result.customerReceipt, stan: result.stan, label: "ANNULATION", copy: "Copie Client")
+        // Live terminals: TM 103 has no receipt; the TM 104 receipt (void STAN) is the merchant copy
+        try assertEmulatorReceipt(result.merchantReceipt, stan: result.stan, label: "ANNULATION", copy: "Copie Commerçant")
+        XCTAssertNil(result.customerReceipt)
         print("--- void merchant copy\n\(result.merchantReceipt!.toPlainText())")
-        print("--- void customer copy\n\(result.customerReceipt!.toPlainText())")
     }
 
     // MARK: - Void modes (TM 103/104 arrive without a terminator)
@@ -193,7 +193,7 @@ final class EmulatorIntegrationTests: XCTestCase {
         XCTAssertTrue(result.pending)
         XCTAssertEqual(result.responseCode, "995")
         XCTAssertEqual(result.stan, "123456")   // TM 103 STAN kept for a TM 008 check
-        XCTAssertTrue(result.merchantReceipt?.toPlainText().contains("Copie Commercant") ?? false)
+        XCTAssertNil(result.merchantReceipt)    // TM 103 carries no receipt on live terminals
     }
 
     func testVoidNoConfirmModeIsPending() async throws {
@@ -202,7 +202,7 @@ final class EmulatorIntegrationTests: XCTestCase {
         XCTAssertFalse(result.success)
         XCTAssertTrue(result.pending)
         XCTAssertEqual(result.stan, "123456")
-        XCTAssertTrue(result.merchantReceipt?.toPlainText().contains("Copie Commercant") ?? false)
+        XCTAssertNil(result.merchantReceipt)    // TM 103 carries no receipt on live terminals
     }
 
     func testVoidRefuseModeFails() async throws {
