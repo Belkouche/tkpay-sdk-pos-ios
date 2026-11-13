@@ -333,16 +333,61 @@ final class TKPayNapsTests: XCTestCase {
         XCTAssertEqual(receipt.lines.last?.alignment, .left)
     }
 
-    func testCancellationConfirmationCarriesSequenceInNS() {
-        let fields = TLVProtocol.parse(TLVProtocol.buildCancellationConfirmation(
-            stan: "123456", ncai: "0100001", sequence: "000321", amount: "15000"))
+    /// Tags of a request frame, in order.
+    private func tagOrder(_ frame: String) -> [String] {
+        var tags: [String] = []
+        var rest = Substring(frame)
+        while rest.count >= 6, let length = Int(rest.dropFirst(3).prefix(3)) {
+            tags.append(String(rest.prefix(3)))
+            rest = rest.dropFirst(6 + length)
+        }
+        return tags
+    }
 
-        // Spec §4.4: TM=004 NS (004) = NS of the TM=003 it confirms; amount echoed from TM=103
-        XCTAssertEqual(fields[TLVProtocol.Tags.TM], TLVProtocol.MessageTypes.cancellationConfirmationRequest)
-        XCTAssertEqual(fields[TLVProtocol.Tags.MT], "15000")
-        XCTAssertEqual(fields[TLVProtocol.Tags.STAN], "123456")
-        XCTAssertEqual(fields[TLVProtocol.Tags.NS], "000321")
-        XCTAssertNil(fields[TLVProtocol.Tags.NSA])
+    func testCancellationRequestFieldOrderAndSequences() {
+        let frame = TLVProtocol.buildCancellationRequest(
+            stan: "123456", ncai: "0100001", ns: "000042", sequence: "000321", amountCentimes: 15000)
+        let T = TLVProtocol.Tags.self
+
+        // Spec v2 §4.3: TM, NCAI, NS, DA, HE, DATR, HETR, STAN, MT, NSA
+        XCTAssertEqual(tagOrder(frame), [T.TM, T.NCAI, T.NS, T.DA, T.HE, T.DATR, T.HETR, T.STAN, T.MT, T.NSA])
+        let fields = TLVProtocol.parse(frame)
+        XCTAssertEqual(fields[T.TM], TLVProtocol.MessageTypes.cancellationRequest)
+        XCTAssertEqual(fields[T.NS], "000042")     // the void's own sequence
+        XCTAssertEqual(fields[T.NSA], "000321")    // the payment's sequence
+        XCTAssertEqual(fields[T.MT], "15000")
+        XCTAssertEqual(fields[T.DATR], fields[T.DA])
+        XCTAssertEqual(fields[T.HETR], fields[T.HE])
+        XCTAssertFalse(frame.hasSuffix("!") || frame.hasSuffix("?"))
+
+        // Without amount or payment sequence, MT and NSA are left out
+        let bare = TLVProtocol.buildCancellationRequest(stan: "123456", ncai: "0100001", ns: "000042")
+        XCTAssertEqual(tagOrder(bare), [T.TM, T.NCAI, T.NS, T.DA, T.HE, T.DATR, T.HETR, T.STAN])
+    }
+
+    func testCancellationConfirmationFieldOrder() {
+        let frame = TLVProtocol.buildCancellationConfirmation(
+            stan: "123456", ncai: "0100001", sequence: "000042", amount: "000000015000",
+            currency: "504", datr: "10112026", hetr: "101500")
+        let T = TLVProtocol.Tags.self
+
+        // Spec v2 §4.4: TM, NCAI, NS, STAN, MT, DE, DATR, HETR, DA, HE — never NSA
+        XCTAssertEqual(tagOrder(frame), [T.TM, T.NCAI, T.NS, T.STAN, T.MT, T.DE, T.DATR, T.HETR, T.DA, T.HE])
+        let fields = TLVProtocol.parse(frame)
+        XCTAssertEqual(fields[T.TM], TLVProtocol.MessageTypes.cancellationConfirmationRequest)
+        XCTAssertEqual(fields[T.NS], "000042")
+        XCTAssertEqual(fields[T.MT], "000000015000")   // echoed verbatim
+        XCTAssertEqual(fields[T.DATR], "10112026")
+        XCTAssertEqual(fields[T.HETR], "101500")
+        XCTAssertNil(fields[T.NSA])
+        XCTAssertFalse(frame.hasSuffix("!") || frame.hasSuffix("?"))
+
+        // DE defaults to 504 with an amount; no amount means no MT/DE; no DATR/HETR when absent
+        let noCurrency = TLVProtocol.parse(TLVProtocol.buildCancellationConfirmation(
+            stan: "123456", ncai: "0100001", sequence: "000042", amount: "15000"))
+        XCTAssertEqual(noCurrency[T.DE], "504")
+        let bare = TLVProtocol.buildCancellationConfirmation(stan: "123456", ncai: "0100001", sequence: "000042")
+        XCTAssertEqual(tagOrder(bare), [T.TM, T.NCAI, T.NS, T.STAN, T.DA, T.HE])
     }
 
     func testDuplicateReceiptRequestCanTargetStan() {
@@ -359,7 +404,8 @@ final class TKPayNapsTests: XCTestCase {
         XCTAssertNil(TLVProtocol.tlvLength("1a3"))
         XCTAssertEqual(TLVProtocol.tlvLength("012"), 12)
 
-        XCTAssertFalse(NapsConnection.endsWithTerminator(Data("001-01X!".utf8)))
+        // Data that stops being TLV falls back to "ends with '!' or '?'"
+        XCTAssertTrue(NapsConnection.isCompleteMessage(Data("001-01X!".utf8)))
         XCTAssertEqual(TLVProtocol.parse("001003101013-01X!"), ["001": "101"])
         // Terminators inside values are data; one between fields ends the frame
         XCTAssertEqual(TLVProtocol.parse("001003101010006Merci?013003000!008006999999"),
@@ -367,14 +413,137 @@ final class TKPayNapsTests: XCTestCase {
         XCTAssertEqual(TLVProtocol.parseReceipt("030-01X", type: .merchant).lines.map { $0.text }, [])
     }
 
+    /// A DP block of `count` receipt lines, each "LINE nn" padded to 40 chars, with an
+    /// optional extra line; lines are '*'-separated and the block ends with '?'.
+    private func longDP(lines count: Int, extra: String? = nil) -> String {
+        var texts = (1...count).map { "LINE \(String(format: "%02d", $0))".padding(toLength: 40, withPad: " ", startingAt: 0) }
+        if let extra = extra { texts.append(extra) }
+        return texts.enumerated().map { i, text in
+            "030002" + String(format: "%02d", (i % 99) + 1) + "031001S032001G033" + String(format: "%03d", text.count) + text
+        }.joined(separator: "*") + "?"
+    }
+
+    func testParseDPDeclared999RunsToItsEndMarker() {
+        // Lane3600: a receipt longer than 999 chars is sent with length 999
+        let dp = longDP(lines: 30, extra: "CARTE 5167940000123315")
+        XCTAssertGreaterThan(dp.count, 999)
+        let frame = "001003108" + "010999" + dp + "013003000" + "008006123456!"
+
+        let fields = TLVProtocol.parse(frame)
+        XCTAssertEqual(fields["001"], "108")
+        XCTAssertEqual(fields["013"], "000")
+        XCTAssertEqual(fields["008"], "123456")
+        let parsedDP = try! XCTUnwrap(fields["010"])
+        XCTAssertEqual(parsedDP.count, dp.count)          // whole block, '?' included
+        XCTAssertTrue(parsedDP.hasSuffix("?"))
+        let lines = TLVProtocol.parseReceipt(parsedDP, type: .merchant).lines.map { $0.text }
+        XCTAssertEqual(lines.count, 31)
+        XCTAssertEqual(lines.last, "CARTE 516794******3315")   // masked past the 999th char
+
+        // maskFrame masks past the 999th char too and keeps the "999" header
+        let masked = TLVProtocol.maskFrame(frame)
+        XCTAssertTrue(masked.hasPrefix("001003108010999"))
+        XCTAssertFalse(masked.contains("5167940000123315"))
+        XCTAssertEqual(TLVProtocol.parse(masked)["013"], "000")
+
+        // A DP declared 999 that is really 999 long (its '?' is the 999th char)
+        let exact = "033992" + String(repeating: "x", count: 992) + "?"
+        XCTAssertEqual(TLVProtocol.parse("001003101010999" + exact + "013003000!")["013"], "000")
+    }
+
+    func testDP999WithoutEndMarkerDoesNotSwallowFollowingFields() {
+        // Exactly 999 chars of sub-records, no '?': the walk must stop at tag 013 (not 03x)
+        let dp = "03000201031001S032001G033" + "971" + String(repeating: "x", count: 971)
+        XCTAssertEqual(dp.count, 999)
+        let frame = "001003101" + "010999" + dp + "013003000" + "0070165167940000123315!"
+
+        let fields = TLVProtocol.parse(frame)
+        XCTAssertEqual(fields["010"]?.count, 999)
+        XCTAssertEqual(fields["013"], "000")
+        XCTAssertEqual(fields["007"], "516794******3315")
+        XCTAssertTrue(NapsConnection.isCompleteMessage(Data(frame.utf8)))
+    }
+
+    func testReceiptMaskingCoversEverySubTagAndRemainder() {
+        let pan = "5167940000123315"
+        // PAN in a non-text sub-tag (031), in an unknown sub-tag (039) and in an unparseable tail
+        let dp = "03000201031016" + pan + "*030002020390164111111111111111*CARTE 6011000990139424?"
+        let masked = TLVProtocol.maskFrame("001003101" + TLVProtocol.buildField(tag: "010", value: dp) + "!")
+        XCTAssertFalse(masked.contains(pan), masked)
+        XCTAssertFalse(masked.contains("4111111111111111"), masked)
+        XCTAssertFalse(masked.contains("6011000990139424"), masked)
+        XCTAssertTrue(masked.contains("516794******3315"))
+        XCTAssertTrue(masked.contains("CARTE 601100******9424?"))
+
+        let parsed = TLVProtocol.parse("001003101" + TLVProtocol.buildField(tag: "010", value: dp) + "!")
+        XCTAssertFalse(parsed["010"]?.contains(pan) ?? true)
+        XCTAssertFalse(parsed["010"]?.contains("6011000990139424") ?? true)
+        XCTAssertEqual(parsed["010"]?.count, dp.count)
+    }
+
+    func testMaskFrameMasksCardNumbersAfterTheWalkStops() {
+        // The walk breaks at the malformed header "01X"; the rest is masked as text
+        let masked = TLVProtocol.maskFrame("001003101" + "01X0165167940000123315" + "!007016 4111111111111111")
+        XCTAssertFalse(masked.contains("5167940000123315"), masked)
+        XCTAssertFalse(masked.contains("4111111111111111"), masked)
+        XCTAssertTrue(masked.hasPrefix("001003101"))
+    }
+
+    func testParseKeepsFieldsAfterTerminatorsInsideReceipt() {
+        let dp = "03000201031001S032001C033006Merci!*03000202031001S032001G033010A bientot??"
+        let frame = "001003102" + TLVProtocol.buildField(tag: "010", value: dp) + "013003000" + "008006222222!"
+        let fields = TLVProtocol.parse(frame)
+        XCTAssertEqual(fields["013"], "000")
+        XCTAssertEqual(fields["008"], "222222")
+        XCTAssertEqual(TLVProtocol.parseReceipt(fields["010"] ?? "", type: .customer).lines.map { $0.text },
+                       ["Merci!", "A bientot?"])
+    }
+
+    func testNonAsciiDigitsInHeadersStopTheWalkWithoutThrowing() {
+        // Arabic-Indic, fullwidth and superscript digits are not header digits
+        XCTAssertEqual(TLVProtocol.parse("001003101013\u{0660}\u{0660}\u{0663}000!"), ["001": "101"])
+        XCTAssertEqual(TLVProtocol.parse("001003101013\u{FF10}\u{FF10}\u{FF13}000!"), ["001": "101"])
+        XCTAssertEqual(TLVProtocol.parse("001003101\u{0660}13003000!"), ["001": "101"])
+        XCTAssertEqual(TLVProtocol.parse("001003101013\u{00B9}23000!"), ["001": "101"])
+        XCTAssertEqual(TLVProtocol.parse(""), [:])
+        XCTAssertEqual(TLVProtocol.parse("010999030002"), [:])   // truncated DP 999: nothing, no crash
+        XCTAssertEqual(TLVProtocol.parse("010999030\u{0660}02xx"), [:])
+        XCTAssertEqual(TLVProtocol.maskFrame("001003101013\u{0660}\u{0660}\u{0663}000"),
+                       "001003101013\u{0660}\u{0660}\u{0663}000")
+    }
+
+    func testCompleteMessageNeedsTerminatorOnFieldBoundary() {
+        let dp = "03000201031001S032001C033006Merci!*03000202031001S032001G033010A bientot?*"
+            + "03000203031001S032001G033004Fin.?"
+        let reply = "001003104" + TLVProtocol.buildField(tag: "010", value: dp) + "013003000"
+        // A read that stops right after the '!' or the '?' ending a receipt line is not complete
+        for cut in ["Merci!", "A bientot?"] {
+            let partial = String(reply[..<reply.range(of: cut)!.upperBound])
+            XCTAssertFalse(NapsConnection.isCompleteMessage(Data(partial.utf8)), partial)
+        }
+        // Nor one that stops after the DP '?' end marker (the field boundary is past it)
+        let afterDP = String(reply[..<reply.range(of: "Fin.?")!.upperBound])
+        XCTAssertFalse(NapsConnection.isCompleteMessage(Data(afterDP.utf8)))
+        XCTAssertTrue(NapsConnection.isCompleteMessage(Data((reply + "!").utf8)))
+        XCTAssertTrue(NapsConnection.isCompleteMessage(Data((reply + "?").utf8)))
+
+        // DP declared 999: complete only after its own end marker and the frame terminator
+        let long = longDP(lines: 30)
+        let frame = "001003108" + "010999" + long + "013003000"
+        let lineCut = String(frame[..<frame.range(of: "LINE 25")!.upperBound])
+        XCTAssertFalse(NapsConnection.isCompleteMessage(Data((lineCut + "?").utf8)))
+        XCTAssertFalse(NapsConnection.isCompleteMessage(Data(("001003108010999" + long).utf8)))
+        XCTAssertTrue(NapsConnection.isCompleteMessage(Data((frame + "!").utf8)))
+    }
+
     func testTerminatorDetection() {
-        XCTAssertTrue(NapsConnection.endsWithTerminator(Data("001003101!".utf8)))
-        XCTAssertTrue(NapsConnection.endsWithTerminator(Data("001003101?".utf8)))
-        XCTAssertFalse(NapsConnection.endsWithTerminator(Data("001003101".utf8)))
-        XCTAssertFalse(NapsConnection.endsWithTerminator(Data()))
+        XCTAssertTrue(NapsConnection.isCompleteMessage(Data("001003101!".utf8)))
+        XCTAssertTrue(NapsConnection.isCompleteMessage(Data("001003101?".utf8)))
+        XCTAssertFalse(NapsConnection.isCompleteMessage(Data("001003101".utf8)))
+        XCTAssertFalse(NapsConnection.isCompleteMessage(Data()))
         // '!' inside a value, or at the end of a partial chunk, is not end-of-message
-        XCTAssertFalse(NapsConnection.endsWithTerminator(Data("033010Merci!".utf8)))
-        XCTAssertTrue(NapsConnection.endsWithTerminator(Data("033006Merci!!".utf8)))
-        XCTAssertFalse(NapsConnection.endsWithTerminator(Data("033006Merci!013003000!".utf8).dropLast(4)))
+        XCTAssertFalse(NapsConnection.isCompleteMessage(Data("033010Merci!".utf8)))
+        XCTAssertTrue(NapsConnection.isCompleteMessage(Data("033006Merci!!".utf8)))
+        XCTAssertFalse(NapsConnection.isCompleteMessage(Data("033006Merci!013003000!".utf8).dropLast(4)))
     }
 }

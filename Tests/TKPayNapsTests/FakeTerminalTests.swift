@@ -157,6 +157,37 @@ final class FakeTerminalTests: XCTestCase {
         }
     }
 
+    func testReadDoesNotStopAtReceiptLineEndingWithQuestionMark() async throws {
+        let receipt = "03000201031001S032001C033010A bientot?*03000202031001S032001G033005Merci?"
+        let reply = f("001", "104") + f("013", "000") + f("010", receipt) + f("008", "222222")
+        let split = reply.range(of: "bientot?")!.upperBound   // chunk ends on a line's '?'
+        try await withTerminal([[String(reply[..<split]), String(reply[split...]) + "!"]]) { port, _ in
+            let connection = NapsConnection(config: NapsConfig(host: "127.0.0.1", port: port, timeout: 10))
+            try await connection.connect()
+            defer { connection.disconnect() }
+
+            let response = try await connection.sendAndReceive("001003010", timeout: 10)
+            XCTAssertEqual(response, reply)
+            XCTAssertEqual(TLVProtocol.parse(response)[TLVProtocol.Tags.STAN], "222222")
+        }
+    }
+
+    func testReplyOver64KBFailsAsInvalidResponse() async throws {
+        let huge = String(repeating: "x", count: 70 * 1024)
+        try await withTerminal([[huge]]) { port, _ in
+            let connection = NapsConnection(config: NapsConfig(host: "127.0.0.1", port: port, timeout: 10))
+            try await connection.connect()
+            defer { connection.disconnect() }
+
+            do {
+                _ = try await connection.sendAndReceive("001003010", timeout: 10)
+                XCTFail("a reply over 64 KB must fail")
+            } catch let error as NapsError {
+                XCTAssertEqual(error.code, .invalidResponse, error.message)
+            }
+        }
+    }
+
     func testRejectedConfirmationIsNotApproved() async throws {
         let phase1 = f("001", "101") + f("013", "000") + f("008", "654321") + "!"
         let phase2 = f("001", "102") + f("013", "307") + f("008", "654321") + "!"
@@ -198,12 +229,52 @@ final class FakeTerminalTests: XCTestCase {
             XCTAssertTrue(result.customerReceipt?.toPlainText().contains("Copie Client") ?? false)
 
             XCTAssertEqual(terminal.requests.count, 2)
+            let request = TLVProtocol.parse(terminal.requests[0])
+            XCTAssertEqual(request[TLVProtocol.Tags.TM], "003")
+            XCTAssertEqual(request[TLVProtocol.Tags.NSA], "000321")   // the payment's sequence
+            let voidNS = try XCTUnwrap(request[TLVProtocol.Tags.NS])   // a new sequence for the void
+            XCTAssertNotEqual(voidNS, "000321")
             let confirm = TLVProtocol.parse(terminal.requests[1])
             XCTAssertEqual(confirm[TLVProtocol.Tags.TM], "004")
             XCTAssertEqual(confirm[TLVProtocol.Tags.MT], "15000")
-            XCTAssertEqual(confirm[TLVProtocol.Tags.NS], "000321")   // same sequence as TM=003
+            XCTAssertEqual(confirm[TLVProtocol.Tags.DE], "504")
+            XCTAssertEqual(confirm[TLVProtocol.Tags.NS], voidNS)   // same NS as TM=003
             XCTAssertNil(confirm[TLVProtocol.Tags.NSA])
+            // TCP requests carry no '!' / '?' terminator
+            for frame in terminal.requests {
+                XCTAssertFalse(frame.hasSuffix("!") || frame.hasSuffix("?"), frame)
+            }
             XCTAssertFalse(result.pending)
+        }
+    }
+
+    func testVoidReceiptOnlyInTM104IsTheMerchantCopy() async throws {
+        // Lane3600 / Sunmi P2: TM 103 carries no receipt; TM 104 carries the only one
+        let r103 = f("001", "103") + f("013", "000") + f("002", "15000") + f("008", "111111") + "!"
+        let r104 = f("001", "104") + f("013", "000") + f("008", "222222")
+            + f("010", dp("ANNULATION Copie Commercant")) + "!"
+        try await withTerminal([[r103], [r104]]) { port, _ in
+            let client = NapsPayClient(config: NapsConfig(host: "127.0.0.1", port: port, timeout: 10))
+            let result = await client.cancelPayment(
+                stan: "111111", registerId: "01", cashierId: "00001", sequence: "000321", amountCentimes: 15000)
+
+            XCTAssertTrue(result.success, result.error ?? "")
+            XCTAssertEqual(result.merchantReceipt?.type, .merchant)
+            XCTAssertTrue(result.merchantReceipt?.toPlainText().contains("Copie Commercant") ?? false)
+            XCTAssertNil(result.customerReceipt)
+        }
+    }
+
+    func testNetworkTestIsUnsupportedOverTcpAndSendsNothing() async throws {
+        try await withTerminal([[f("001", "109") + f("013", "000") + "!"]]) { port, terminal in
+            let client = NapsPayClient(config: NapsConfig(host: "127.0.0.1", port: port, timeout: 10))
+            let result = try await client.networkTest()
+
+            XCTAssertFalse(result.success)
+            XCTAssertEqual(result.responseCode, "UNSUPPORTED")
+            XCTAssertTrue(result.message.contains("not supported over TCP"), result.message)
+            try await Task.sleep(nanoseconds: 300_000_000)
+            XCTAssertTrue(terminal.requests.isEmpty, "network test sent \(terminal.requests)")
         }
     }
 
@@ -275,7 +346,9 @@ final class FakeTerminalTests: XCTestCase {
                 stan: "111111", registerId: "01", cashierId: "00001", sequence: "000321", amountCentimes: 15000)
 
             XCTAssertTrue(result.success, result.error ?? "")
-            XCTAssertEqual(result.customerReceipt?.lines.map { $0.text }, ["ANNULATION", "Copie Client"])
+            // TM 103 had no receipt, so the TM 104 receipt is the merchant copy
+            XCTAssertEqual(result.merchantReceipt?.lines.map { $0.text }, ["ANNULATION", "Copie Client"])
+            XCTAssertNil(result.customerReceipt)
         }
     }
 

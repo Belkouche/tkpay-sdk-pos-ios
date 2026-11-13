@@ -2,6 +2,45 @@
 
 All notable changes to the TKPay NAPS iOS SDK are documented here.
 
+## Unreleased — Sunmi P2 / Ingenico Lane3600 fixes
+
+Ported from the canonical C# SDK and the Node SDK, where these frames were verified live
+on a Sunmi P2 (TCP) and a Lane3600 (USB). This SDK is TCP only, so the USB serial fixes
+(port warm-up, waits between frames, byte lengths, kept-open port) do not apply.
+
+- **fix (void frames, spec v2 §4.3/§4.4):** TM 003 is now TM, NCAI, NS, DA, HE, DATR,
+  HETR, STAN, MT, NSA. Its NS is a new sequence generated for the void; the `sequence`
+  passed to `cancelPayment` is the payment's NS and goes in NSA. TM 004 is TM, NCAI, NS
+  (same as TM 003), STAN, MT and DE echoed from TM 103 (DE `504` if absent), DATR/HETR
+  echoed from TM 103, DA, HE; never NSA. TM 004 used to carry the caller's `sequence` as
+  NS. `cancelPayment`'s signature is unchanged; `TLVProtocol.buildCancellationRequest`
+  takes a new `ns:` argument and `buildCancellationConfirmation` new optional
+  `currency:`, `datr:` and `hetr:` arguments.
+- **fix (void receipt):** when TM 103 carries no receipt and TM 104 does, as on the Sunmi
+  P2 (printed "Copie Commerçant") and the Lane3600, `cancelPayment` returns the TM 104
+  receipt as `merchantReceipt` and no `customerReceipt`. Terminals that send a receipt
+  with TM 103 are unchanged.
+- **fix (network test):** `networkTest()` sends nothing over TCP and returns
+  `success == false`, `responseCode == "UNSUPPORTED"`. The NapsPay app on a Sunmi P2
+  answers TM 009 with TM 101 / CR 902, and a test frame crashed the app.
+- **fix (reader):** a reply ends at a `!` / `?` terminator on a field boundary, with fields
+  walked by their length; the walk only runs when the data ends with `!` or `?`. A receipt
+  line ending in `?` no longer ends the reply when a read stops right after it. Data that
+  stops being TLV falls back to "ends with `!` or `?`". The 1 s silence fallback and the
+  64 KB cap are kept.
+- **fix (long receipts):** a DP declared 999 long (the Lane3600 writes 999 when the
+  receipt is longer) now runs to its own `?` end marker, walking receipt sub-tags
+  030–039 only; it used to be cut at 999 chars. A DP exactly 999 long without `?` still
+  ends at 999 chars, so it cannot swallow the fields after it.
+- **fix (parser):** `parse`, `maskFrame` and the reader share one field walker. Header
+  digits are ASCII `0`–`9` only; malformed input stops the walk and never throws.
+- **fix (card numbers):** receipt masking covers every DP sub-tag value, not only the line
+  text, and any part of a reply that cannot be walked as fields is masked as text instead
+  of being copied as is.
+- Requests over TCP still carry no `!` / `?` terminator (a `!`-terminated frame got no
+  reply from the Sunmi P2); now covered by a test. Management operations already used
+  `timeout` (120 s), not a shorter fixed timeout.
+
 ## [1.4.0] - 2026-11-09
 
 - **Removed the gateway notification.** `processPayment` no longer sends a background

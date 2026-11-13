@@ -95,9 +95,9 @@ public class NapsConnection {
             throw NapsError.invalidResponse("Empty response from terminal")
         }
 
-        // Strip the trailing terminator ('!' v2, '?' v1) only when it follows complete
-        // TLV units: a '?' that ends a DP value (spec §5) belongs to the value.
-        if NapsConnection.endsWithTerminator(response) {
+        // Strip the trailing terminator ('!' v2, '?' v1) only when it ends the reply on a
+        // field boundary: a '?' that ends a DP value (spec §5) belongs to the value.
+        if NapsConnection.isCompleteMessage(response) {
             responseString.removeLast()
         }
 
@@ -111,24 +111,15 @@ public class NapsConnection {
         return c == "!" || c == "?"
     }
 
-    /// Whether a received buffer is a complete frame: whole TLV units followed by a
-    /// single terminator as the last character. A '!' or '?' inside a value (or at the
-    /// end of a partial chunk) is not treated as end-of-message.
-    static func endsWithTerminator(_ data: Data) -> Bool {
+    /// Whether a received buffer is a complete reply. The field walk only runs when the data
+    /// ends with '!' or '?'; it then requires a terminator on a field boundary (see
+    /// `TLVProtocol.isCompleteMessage`), so a '!' or '?' inside a value, or at the end of a
+    /// partial chunk, is not end-of-message.
+    static func isCompleteMessage(_ data: Data) -> Bool {
         guard let text = String(data: data, encoding: .utf8), let last = text.last, isTerminator(last) else {
             return false
         }
-        let body = text.dropLast()
-        var index = body.startIndex
-        while index < body.endIndex {
-            guard body.distance(from: index, to: body.endIndex) >= 6 else { return false }
-            let lengthStart = body.index(index, offsetBy: 3)
-            let lengthEnd = body.index(lengthStart, offsetBy: 3)
-            guard let length = TLVProtocol.tlvLength(body[lengthStart..<lengthEnd]),
-                  body.distance(from: lengthEnd, to: body.endIndex) >= length else { return false }
-            index = body.index(lengthEnd, offsetBy: length)
-        }
-        return true
+        return TLVProtocol.isCompleteMessage(text)
     }
 
     /// Disconnect from terminal
@@ -225,7 +216,7 @@ public class NapsConnection {
                     return
                 }
 
-                if isComplete || content == nil || NapsConnection.endsWithTerminator(receivedData) {
+                if isComplete || content == nil || NapsConnection.isCompleteMessage(receivedData) {
                     if receivedData.isEmpty {
                         finish(.failure(NapsError.invalidResponse("Empty response")))
                     } else {

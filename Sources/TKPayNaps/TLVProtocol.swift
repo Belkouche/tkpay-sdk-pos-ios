@@ -283,50 +283,69 @@ public enum TLVProtocol {
         return msg
     }
 
-    /// Build cancellation request TLV (TM=003)
+    /// Build cancellation request TLV (TM=003) — Phase 1 of a void (spec v2 §4.3).
     ///
-    /// NapsPay v5.4.4+ requires the original amount (TAG 002) in the frame.
-    /// Pass `amountCentimes` when targeting v5.4.4+.
+    /// Fields and order: TM, NCAI, NS, DA, HE, DATR, HETR, STAN, [MT], [NSA].
+    /// - `ns`: a new sequence number for the void itself; TM=004 repeats it.
+    /// - `sequence`: the NS of the payment being voided, sent as NSA (005); omitted when nil or empty.
+    /// - `amountCentimes`: the original amount — NapsPay v5.4.4+ requires it.
     public static func buildCancellationRequest(
         stan: String,
         ncai: String,
-        sequence: String,
+        ns: String,
+        sequence: String? = nil,
         amountCentimes: Int? = nil
     ) -> String {
         let dateTime = getCurrentDateTime()
         var msg = buildField(tag: Tags.TM, value: MessageTypes.cancellationRequest)
+            + buildField(tag: Tags.NCAI, value: ncai)
+            + buildField(tag: Tags.NS, value: ns)
+            + buildField(tag: Tags.DA, value: dateTime.date)
+            + buildField(tag: Tags.HE, value: dateTime.time)
+            + buildField(tag: Tags.DATR, value: dateTime.date)
+            + buildField(tag: Tags.HETR, value: dateTime.time)
+            + buildField(tag: Tags.STAN, value: stan)
         if let amount = amountCentimes {
             msg += buildField(tag: Tags.MT, value: String(amount))
         }
-        msg += buildField(tag: Tags.STAN, value: stan)
-            + buildField(tag: Tags.NCAI, value: ncai)
-            + buildField(tag: Tags.NSA, value: sequence)
-            + buildField(tag: Tags.DA, value: dateTime.date)
-            + buildField(tag: Tags.HE, value: dateTime.time)
+        if let sequence = sequence, !sequence.isEmpty {
+            msg += buildField(tag: Tags.NSA, value: sequence)
+        }
         return msg
     }
 
-    /// Build cancellation confirmation request TLV (TM=004)
+    /// Build cancellation confirmation request TLV (TM=004) — Phase 2 of a void (spec v2 §4.4).
     ///
-    /// Sent on the same connection after receiving MT=103 from TM=003. Per spec §4.4
-    /// the sequence goes in NS (004) with the same value as the TM=003 it confirms
-    /// (verified on a live v5.4.4 terminal). `amount` must echo the amount (TAG 002, 12-digit) from the MT=103
-    /// response — omitting it is refused with CR=909 on NapsPay v5.4.4+.
+    /// Sent on the same connection after MT=103 CR=000; it executes the reversal.
+    /// Fields and order: TM, NCAI, NS, STAN, [MT, DE], [DATR], [HETR], DA, HE. No NSA.
+    /// - `sequence`: the NS of the TM=003 being confirmed.
+    /// - `amount`, `currency`, `datr`, `hetr`: echoed from MT=103. Omitting the amount is
+    ///   refused with CR=909 on NapsPay v5.4.4+; DE defaults to "504" when absent.
     public static func buildCancellationConfirmation(
         stan: String,
         ncai: String,
         sequence: String,
-        amount: String? = nil
+        amount: String? = nil,
+        currency: String? = nil,
+        datr: String? = nil,
+        hetr: String? = nil
     ) -> String {
         let dateTime = getCurrentDateTime()
         var msg = buildField(tag: Tags.TM, value: MessageTypes.cancellationConfirmationRequest)
-        if let amount = amount {
-            msg += buildField(tag: Tags.MT, value: amount)
-        }
-        msg += buildField(tag: Tags.STAN, value: stan)
             + buildField(tag: Tags.NCAI, value: ncai)
             + buildField(tag: Tags.NS, value: sequence)
-            + buildField(tag: Tags.DA, value: dateTime.date)
+            + buildField(tag: Tags.STAN, value: stan)
+        if let amount = amount, !amount.isEmpty {
+            msg += buildField(tag: Tags.MT, value: amount)
+            msg += buildField(tag: Tags.DE, value: (currency?.isEmpty ?? true) ? Currency.MAD : currency!)
+        }
+        if let datr = datr, !datr.isEmpty {
+            msg += buildField(tag: Tags.DATR, value: datr)
+        }
+        if let hetr = hetr, !hetr.isEmpty {
+            msg += buildField(tag: Tags.HETR, value: hetr)
+        }
+        msg += buildField(tag: Tags.DA, value: dateTime.date)
             + buildField(tag: Tags.HE, value: dateTime.time)
         return msg
     }
@@ -405,35 +424,20 @@ public enum TLVProtocol {
 
     /// Parse TLV string into fields dictionary.
     ///
-    /// Parsing stops at the first end-of-message terminator (`!` for v2, `?` for v1)
-    /// so any receipt content or noise after it is ignored. Both terminators are
-    /// accepted so the parser is protocol-version agnostic.
+    /// Fields are walked by their length, so a terminator ('!' v2, '?' v1) inside a value
+    /// (receipt text, the DP '?' end marker) is data; one where the next field would start
+    /// ends the frame, and anything after it is ignored. Malformed data stops the walk.
     public static func parse(_ tlvString: String) -> [String: String] {
         var fields: [String: String] = [:]
+        let chars = Array(tlvString)
+        var pos = 0
 
-        var index = tlvString.startIndex
+        while pos + 6 <= chars.count {
+            if chars[pos] == "!" || chars[pos] == "?" { break }
+            guard let end = fieldEnd(chars, pos), end <= chars.count else { break }
 
-        while index < tlvString.endIndex {
-            // A terminator ('!' v2, '?' v1) ends the frame only between fields; inside
-            // a value (e.g. the DP '?' end marker, "Merci!") it is data.
-            if tlvString[index] == "!" || tlvString[index] == "?" { break }
-            // Need at least 6 chars for tag + length
-            guard tlvString.distance(from: index, to: tlvString.endIndex) >= 6 else { break }
-
-            let tagEnd = tlvString.index(index, offsetBy: 3)
-            let tag = String(tlvString[index..<tagEnd])
-
-            let lengthEnd = tlvString.index(tagEnd, offsetBy: 3)
-            let lengthStr = String(tlvString[tagEnd..<lengthEnd])
-
-            // Validate length is numeric
-            guard let length = tlvLength(lengthStr) else { break }
-
-            // Check if we have enough data for the value
-            guard tlvString.distance(from: lengthEnd, to: tlvString.endIndex) >= length else { break }
-
-            let valueEnd = tlvString.index(lengthEnd, offsetBy: length)
-            var value = String(tlvString[lengthEnd..<valueEnd])
+            let tag = String(chars[pos..<pos + 3])
+            var value = String(chars[pos + 6..<end])
 
             // Card numbers are masked as soon as they are parsed: NCAR and DP line text
             if tag == Tags.NCAR {
@@ -443,10 +447,67 @@ public enum TLVProtocol {
             }
 
             fields[tag] = value
-            index = valueEnd
+            pos = end
         }
 
         return fields
+    }
+
+    /// True once `text` holds a complete reply: walking its fields by their length lands on a
+    /// '!' / '?' terminator. A terminator inside a value (receipt lines end with '?') is data,
+    /// so a read that happens to stop right after one is not taken as the end. If the data
+    /// stops being TLV, a trailing terminator is accepted as the end.
+    static func isCompleteMessage(_ text: String) -> Bool {
+        let chars = Array(text)
+        var pos = 0
+        while pos < chars.count {
+            if chars[pos] == "!" || chars[pos] == "?" { return true }
+            guard pos + 6 <= chars.count else { return false }
+            guard let end = fieldEnd(chars, pos) else {
+                return chars.last == "!" || chars.last == "?"
+            }
+            pos = end
+        }
+        return false
+    }
+
+    /// End offset (exclusive) of the field starting at `pos`, or nil when its header is
+    /// not 3 + 3 ASCII digits. The result can be past `chars.count` when the field is not
+    /// fully received yet.
+    ///
+    /// The Ingenico Lane3600 writes 999 as the DP length when the receipt is longer (a
+    /// duplicate holding both copies is ~2,150 chars), so a DP declared 999 long ends at
+    /// its own '?' end marker, found by walking its sub-records (3-digit sub-tag, 3-digit
+    /// length, value) and '*' line separators. The '?' is part of the DP value. Only
+    /// receipt sub-tags (030-039) are walked: at the first other tag the declared end is
+    /// returned, so a DP exactly 999 long without '?' never swallows the fields after it.
+    static func fieldEnd(_ chars: [Character], _ pos: Int) -> Int? {
+        guard asciiNumber(chars, pos, 3) != nil, let length = asciiNumber(chars, pos + 3, 3) else { return nil }
+        let declaredEnd = pos + 6 + length
+        guard String(chars[pos..<pos + 3]) == Tags.DP, length == 999 else { return declaredEnd }
+        var i = pos + 6
+        while i < chars.count {
+            if chars[i] == "*" { i += 1; continue }
+            if chars[i] == "?" { return max(i + 1, declaredEnd) }
+            guard i + 6 <= chars.count else { return chars.count + 1 }   // rest not received yet
+            guard chars[i] == "0", chars[i + 1] == "3", asciiNumber(chars, i, 3) != nil,
+                  let subLength = asciiNumber(chars, i + 3, 3) else {
+                return declaredEnd
+            }
+            i += 6 + subLength
+        }
+        return chars.count + 1
+    }
+
+    /// Value of `count` ASCII digits ('0'-'9') at `pos`, or nil (non-digit, or out of range).
+    private static func asciiNumber(_ chars: [Character], _ pos: Int, _ count: Int) -> Int? {
+        guard pos >= 0, pos + count <= chars.count else { return nil }
+        var value = 0
+        for c in chars[pos..<pos + count] {
+            guard let ascii = c.asciiValue, ascii >= 48, ascii <= 57 else { return nil }
+            value = value * 10 + Int(ascii - 48)
+        }
+        return value
     }
 
     // MARK: - Receipt Parsing
@@ -566,35 +627,38 @@ public enum TLVProtocol {
         }
     }
 
-    /// Mask the line text (sub-tag 033) of a DP block, leaving its structure intact.
+    /// Mask card numbers in every sub-tag value of a DP block, and in any part that cannot
+    /// be walked as sub-records, leaving its structure intact.
     static func maskReceiptData(_ dp: String) -> String {
-        return maskFields(dp) { tag, value in
-            tag == ReceiptTags.content ? maskCardNumbersInText(value) : value
+        return maskFields(dp) { _, value in
+            maskCardNumbersInText(value)
         }
     }
 
     /// Walk TLV units (skipping '*' between them, stopping at '?'/'!' or malformed
-    /// data) and rewrite each value; everything not walked is copied unchanged.
+    /// data) and rewrite each value. A length header is kept as sent when the value length
+    /// is unchanged (a DP declared 999 that runs to its end marker keeps "999"). Fails
+    /// closed: card numbers in any part that is not walked as a field are masked as text.
     private static func maskFields(_ text: String, _ transform: (String, String) -> String) -> String {
+        let chars = Array(text)
         var result = ""
-        var index = text.startIndex
-        while index < text.endIndex {
-            if text[index] == "*" {
+        var pos = 0
+        while pos < chars.count {
+            if chars[pos] == "*" {
                 result.append("*")
-                index = text.index(after: index)
+                pos += 1
                 continue
             }
-            guard text.distance(from: index, to: text.endIndex) >= 6 else { break }
-            let tagEnd = text.index(index, offsetBy: 3)
-            let lengthEnd = text.index(tagEnd, offsetBy: 3)
-            guard let length = tlvLength(text[tagEnd..<lengthEnd]),
-                  text.distance(from: lengthEnd, to: text.endIndex) >= length else { break }
-            let valueEnd = text.index(lengthEnd, offsetBy: length)
-            let value = transform(String(text[index..<tagEnd]), String(text[lengthEnd..<valueEnd]))
-            result += text[index..<tagEnd] + String(format: "%03d", value.count) + value
-            index = valueEnd
+            guard let end = fieldEnd(chars, pos), end <= chars.count else { break }
+            let tag = String(chars[pos..<pos + 3])
+            let original = String(chars[pos + 6..<end])
+            let value = transform(tag, original)
+            let header = value.count == original.count
+                ? String(chars[pos + 3..<pos + 6]) : String(format: "%03d", value.count)
+            result += tag + header + value
+            pos = end
         }
-        result += text[index...]
+        result += maskCardNumbersInText(String(chars[pos...]))
         return result
     }
 

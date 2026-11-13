@@ -172,15 +172,21 @@ A void (cancellation) is also two exchanges on one connection. `cancelPayment` d
 sequenceDiagram
     participant App as Your app (ECR)
     participant T as Terminal
-    App->>T: TM 003 void request (STAN of the payment, amount, NS)
-    T-->>App: TM 103 transaction found? (CR, amount, merchant receipt)
+    App->>T: TM 003 void request (STAN and amount of the payment, new NS, payment's NS as NSA)
+    T-->>App: TM 103 transaction found? (CR, amount, receipt on some terminals)
     alt CR = 000
-        App->>T: TM 004 void confirmation (same NS, amount echoed from TM 103)
-        T-->>App: TM 104 void executed? (CR, void STAN, customer receipt)
+        App->>T: TM 004 void confirmation (same NS as TM 003, amount/date/time echoed from TM 103)
+        T-->>App: TM 104 void executed? (CR, void STAN, receipt)
     else CR != 000
         Note over App: not found / already cancelled: failure
     end
 ```
+
+The frames follow spec v2 §4.3/§4.4. TM 003 carries TM, NCAI, NS, DA, HE, DATR, HETR,
+STAN, MT and NSA. Its NS is a new sequence the SDK generates for the void; the
+`sequence` you pass is the NS of the payment being voided and goes in NSA. TM 004
+carries TM, NCAI, the same NS as TM 003, STAN, MT and DE echoed from TM 103 (DE `504`
+if absent), DATR and HETR echoed from TM 103, DA and HE. TM 004 never carries NSA.
 
 TM 103 with `000` only means "transaction found". The reversal is executed by TM 004,
 and only TM 104 says whether it happened. The result therefore has three states:
@@ -200,7 +206,7 @@ let void = await client.cancelPayment(
     stan: payment.stan ?? "",   // STAN of the payment to void
     registerId: "01",
     cashierId: "00001",
-    sequence: "000321",         // 6-digit NS for this void; the SDK reuses it in TM 004
+    sequence: payment.sequence ?? "",   // NS of the payment, sent as NSA; the void gets its own NS
     amountCentimes: 15000)      // original amount in centimes (required by v5.4.4)
 
 if void.success {
@@ -217,6 +223,11 @@ if void.success {
     print("Void failed: CR \(void.responseCode), \(void.error ?? "")")
 }
 ```
+
+Void receipt: when TM 103 carries a receipt, it is `merchantReceipt` and the TM 104
+receipt is `customerReceipt`. When TM 103 carries none and TM 104 does, as on the
+Sunmi P2 (which prints it "Copie Commerçant") and the Ingenico Lane3600, the TM 104
+receipt is returned as `merchantReceipt` and `customerReceipt` is `nil`.
 
 `cancelPayment` never throws: connection errors come back as a failure with
 `responseCode == ""` and the message in `error`. A second void of a payment that was
@@ -236,12 +247,14 @@ sent to the terminal.
 let reachable = await client.testConnection()
 ```
 
-**Network test** (TM 009). Asks the terminal to check its link to the NAPS server.
-Run it before taking payments.
+**Network test** (TM 009). Not supported over TCP, so not supported by this SDK:
+`networkTest()` sends nothing and returns `success == false` with
+`responseCode == "UNSUPPORTED"`. The NapsPay app on Sunmi terminals does not implement
+TM 009 (it answers TM 101 with CR 902), and a test frame crashed the app on a Sunmi P2.
+TM 009 is only answered over USB serial (Ingenico Lane3600).
 
 ```swift
-let ping = try await client.networkTest()
-print(ping.success ? ping.message : "Network down: \(ping.responseCode) \(ping.message)")
+let ping = try await client.networkTest()   // always "UNSUPPORTED" over TCP
 ```
 
 **Duplicate receipt** (TM 008). Reprints the receipt of a payment from the current
@@ -316,6 +329,7 @@ Which copy is where:
 | Approved payment | TM 101 ("Copie Commercant") | TM 102 ("Copie Client") |
 | Declined payment | refusal receipt from TM 101, if sent | `nil` |
 | Void, success | TM 103 ("ANNULATION", "Copie Commercant") | TM 104 ("ANNULATION", "Copie Client") |
+| Void, TM 103 without receipt (Sunmi P2, Lane3600) | TM 104 | `nil` |
 | Void, pending | TM 103 | TM 104 if it carried one (995), else `nil` |
 | Duplicate (`duplicateReceipt`) | TM 108 | `nil` |
 
@@ -430,9 +444,15 @@ let config = NapsConfig(
 - `timeout` bounds the TCP connect and every reply except the two confirmations.
   The 120 s default covers the time a customer needs at the terminal.
 - `confirmationTimeout` bounds the TM 102 and TM 104 replies.
-- A reply ends at its `!` or `?` terminator. Some replies (TM 103/104 on v5.4.4) have
-  none: the SDK then treats 1 s of silence after the last bytes as the end of the reply.
-  Replies over 64 KB are rejected.
+- A reply ends at a `!` or `?` terminator found on a field boundary (fields are walked by
+  their length). A `!` or `?` inside a value, such as a receipt line ending in `?`, is
+  data. Some replies (TM 103/104 on v5.4.4) have no terminator: the SDK then treats 1 s
+  of silence after the last bytes as the end of the reply. Replies over 64 KB are
+  rejected with `.invalidResponse`.
+- A receipt (DP) declared 999 long runs to its own `?` end marker: some terminals write
+  999 when the receipt is longer.
+- Requests are sent without a `!` or `?` terminator (a `!`-terminated frame got no
+  reply from a Sunmi P2).
 
 Throwing calls throw `NapsError`, whose `code` is a `NapsErrorCode` and whose `message`
 is also its `localizedDescription`:
@@ -459,7 +479,8 @@ Which call reports errors how:
 | `processPayment` | returns `success == false` with `responseCode` and `error` | throws `NapsError` |
 | `cancelPayment` | returns failure or `pending` | returns failure (`responseCode == ""`); a missing TM 104 returns `pending` |
 | `settlement` | returns `success == false` with `error` | returns `success == false` |
-| `networkTest`, `totals`, `referencing`, `duplicateReceipt`, `resetPinPad` | returns `success == false` (or nothing for `resetPinPad`) | throws `NapsError` |
+| `networkTest` | always `success == false`, `responseCode == "UNSUPPORTED"` (nothing is sent) | never contacts the terminal |
+| `totals`, `referencing`, `duplicateReceipt`, `resetPinPad` | returns `success == false` (or nothing for `resetPinPad`) | throws `NapsError` |
 | `testConnection` | n/a | returns `false` |
 
 `processPayment` also throws `.invalidResponse` before connecting when the request is
@@ -528,7 +549,7 @@ Modes with tests: `approve`, `decline`, `error`, `confirm_error`, `no_confirm`,
 |---|---|
 | `testConnection()` returns `false`, or `.connectionFailed` | Wrong IP or port, the device is on another network or Wi-Fi isolation is on, NapsPay is not running on the terminal, or the local-network permission was denied (iOS Settings → Privacy → Local Network). Check that port 4444 is reachable from the device. |
 | `.timeout` on a payment | Nobody presented a card within `timeout`, or the terminal is not on its "waiting for till" screen. If it happens in phase 2, check with `duplicateReceipt()` before retrying. |
-| CR `909` | Terminal or NAPS server unreachable (run `networkTest()`), referencing never done (run `referencing()`), or a required field missing (TM 004 without amount: pass `amountCentimes` to `cancelPayment`). |
+| CR `909` | Terminal or NAPS server unreachable (check the terminal's network), referencing never done (run `referencing()`), or a required field missing (TM 004 without amount: pass `amountCentimes` to `cancelPayment`). |
 | CR `302` on a void | No transaction with that STAN in the current business day. Check the STAN and that the payment was made today on this terminal. |
 | CR `482` on a void | The payment was already voided. Treat as done; do not retry. |
 | Void returns `pending` | TM 104 was `995` or never arrived. The reversal may or may not have happened. Use `duplicateReceipt(stan: void.stan)` and check before any retry. |
