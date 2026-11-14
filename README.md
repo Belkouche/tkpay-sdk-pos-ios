@@ -47,7 +47,7 @@ Swift Package Manager, in `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/Belkouche/tkpay-sdk-pos-naps-ios.git", from: "1.4.0")
+    .package(url: "https://github.com/Belkouche/tkpay-sdk-pos-naps-ios.git", from: "1.4.1")
 ]
 // and add "TKPayNaps" to your target's dependencies
 ```
@@ -268,7 +268,8 @@ if copy.success {
 }
 ```
 
-**Totals** (TM 010). The day's payment totals for this register, as receipt text.
+**Totals** (TM 010, "Payment Totals" in spec v2.0 §4.7). The day's payment totals for
+this register, as receipt text. It closes no batch.
 
 ```swift
 let totals = try await client.totals()
@@ -277,14 +278,11 @@ if totals.success {
 }
 ```
 
-**Settlement** (end of day). Also sends TM 010, without a sequence number, and never
-throws: errors come back in `error` (`052` "Already settled today", `909` "Terminal or
-server is down").
-
-```swift
-let settlement = await client.settlement(registerId: "01", cashierId: "00001")
-print(settlement.success ? "Settled" : settlement.error ?? "")
-```
+**Settlement** (télécollecte). Not part of the ECR protocol: spec v2.0 §4.7 defines
+TM 010 as Payment Totals, and there is no settlement message. Run télécollecte from the
+terminal's own menu. `settlement` is deprecated: it sends nothing, opens no connection
+and returns `success == false` with `responseCode == "UNSUPPORTED"`. Use `totals()` for
+the daily totals ticket.
 
 **Referencing** (TM 013). Makes the terminal download its parameters from the NAPS
 server. Required before the terminal can take payments. `TLVProtocol.Tide.merchant`
@@ -478,7 +476,7 @@ Which call reports errors how:
 |---|---|---|
 | `processPayment` | returns `success == false` with `responseCode` and `error` | throws `NapsError` |
 | `cancelPayment` | returns failure or `pending` | returns failure (`responseCode == ""`); a missing TM 104 returns `pending` |
-| `settlement` | returns `success == false` with `error` | returns `success == false` |
+| `settlement` (deprecated) | always `success == false`, `responseCode == "UNSUPPORTED"` (nothing is sent) | never contacts the terminal |
 | `networkTest` | always `success == false`, `responseCode == "UNSUPPORTED"` (nothing is sent) | never contacts the terminal |
 | `totals`, `referencing`, `duplicateReceipt`, `resetPinPad` | returns `success == false` (or nothing for `resetPinPad`) | throws `NapsError` |
 | `testConnection` | n/a | returns `false` |
@@ -554,7 +552,6 @@ Modes with tests: `approve`, `decline`, `error`, `confirm_error`, `no_confirm`,
 | CR `482` on a void | The payment was already voided. Treat as done; do not retry. |
 | Void returns `pending` | TM 104 was `995` or never arrived. The reversal may or may not have happened. Use `duplicateReceipt(stan: void.stan)` and check before any retry. |
 | CR `307` | A request did not match what the terminal expected, e.g. a confirmation whose amount or PAN differs from the payment. |
-| CR `052` on settlement | Already settled today. |
 
 ## Changelog
 

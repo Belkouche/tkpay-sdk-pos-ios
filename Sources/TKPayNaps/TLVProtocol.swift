@@ -61,11 +61,13 @@ public enum TLVProtocol {
         public static let cancellationConfirmationResponse = "104"
         @available(*, deprecated, renamed: "cancellationConfirmationResponse")
         public static let cancellationCorrection = "104"
+        @available(*, deprecated, message: "TM 010 is Payment Totals, not settlement (spec v2.0 §4.7). Use totals / buildTotalsRequest.")
         public static let settlementRequest = "010"
+        @available(*, deprecated, message: "TM 010 is Payment Totals, not settlement (spec v2.0 §4.7). Use totals / buildTotalsRequest.")
         public static let settlementResponse = "110"
         public static let duplicateReceipt = "008"     // Reprint last receipt
         public static let networkTest = "009"          // Ping / network test
-        public static let totals = "010"               // Totals report (shares TM with settlement)
+        public static let totals = "010"               // Payment Totals report (spec v2.0 §4.7)
         public static let resetPinPad = "012"          // Reset the PIN pad
         public static let referencing = "013"          // Load parameter set (referencement)
     }
@@ -350,7 +352,8 @@ public enum TLVProtocol {
         return msg
     }
 
-    /// Build settlement request TLV (TM=010 — telecollecte)
+    /// Deprecated: TM=010 is Payment Totals, not télécollecte (spec v2.0 §4.7).
+    @available(*, deprecated, message: "TM 010 is Payment Totals, not settlement (spec v2.0 §4.7). Use totals / buildTotalsRequest.")
     public static func buildSettlementRequest(ncai: String) -> String {
         let dateTime = getCurrentDateTime()
 

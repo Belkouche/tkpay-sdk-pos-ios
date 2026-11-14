@@ -54,10 +54,12 @@ final class EmulatorIntegrationTests: XCTestCase {
         XCTAssertTrue(customer.contains("Copie Client"), customer)
     }
 
-    func testSettlement() async throws {
+    @available(*, deprecated)
+    func testSettlementIsUnsupported() async throws {
         try requireMode("approve")
         let result = await client.settlement(registerId: "01", cashierId: "00001")
-        XCTAssertTrue(result.success, result.error ?? "")
+        XCTAssertFalse(result.success)
+        XCTAssertEqual(result.responseCode, "UNSUPPORTED")
     }
 
     func testNetworkTest() async throws {
