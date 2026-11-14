@@ -177,17 +177,20 @@ public struct Receipt {
 
 // MARK: - Settlement Result
 
-/// Settlement result for TM=010 (telecollecte)
+/// Result of the deprecated `settlement` method. Télécollecte is not part of the
+/// NapsPay ECR protocol (spec v2.0 §4.7: TM=010 is Payment Totals), so `settlement`
+/// sends nothing and always returns `success == false`, `responseCode == "UNSUPPORTED"`,
+/// `date` and `time` nil, and the explanation in `error`. Use `totals()` instead.
 public struct SettlementResult {
-    /// Whether settlement was accepted by NAPS server
+    /// Always false: télécollecte cannot be run over the ECR protocol
     public let success: Bool
-    /// Response code (000 = success)
+    /// Always "UNSUPPORTED"
     public let responseCode: String
-    /// Settlement date (DDMMYYYY)
+    /// Always nil
     public let date: String?
-    /// Settlement time (HHMMSS)
+    /// Always nil
     public let time: String?
-    /// Error message if settlement failed
+    /// Why the operation is unsupported
     public let error: String?
 }
 

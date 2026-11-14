@@ -9,12 +9,14 @@ private final class FakeTerminal {
     private let queue = DispatchQueue(label: "fake.terminal")
     private var replies: [[String]]
     private(set) var requests: [String] = []
+    private(set) var connections = 0
 
     init(replies: [[String]]) throws {
         self.replies = replies
         listener = try NWListener(using: .tcp, on: .any)
         listener.newConnectionHandler = { [weak self] conn in
             guard let self = self else { return }
+            self.connections += 1
             conn.start(queue: self.queue)
             self.serve(conn)
         }
@@ -275,6 +277,23 @@ final class FakeTerminalTests: XCTestCase {
             XCTAssertTrue(result.message.contains("not supported over TCP"), result.message)
             try await Task.sleep(nanoseconds: 300_000_000)
             XCTAssertTrue(terminal.requests.isEmpty, "network test sent \(terminal.requests)")
+        }
+    }
+
+    @available(*, deprecated)
+    func testSettlementIsUnsupportedAndSendsNothing() async throws {
+        try await withTerminal([[f("001", "110") + f("013", "000") + "!"]]) { port, terminal in
+            let client = NapsPayClient(config: NapsConfig(host: "127.0.0.1", port: port, timeout: 10))
+            let result = await client.settlement(registerId: "01", cashierId: "00001")
+
+            XCTAssertFalse(result.success)
+            XCTAssertEqual(result.responseCode, "UNSUPPORTED")
+            XCTAssertEqual(result.error, "Telecollecte is not part of the NapsPay ECR protocol: run it from the terminal menu. Use totals() for the daily totals ticket.")
+            XCTAssertNil(result.date)
+            XCTAssertNil(result.time)
+            try await Task.sleep(nanoseconds: 300_000_000)
+            XCTAssertEqual(terminal.connections, 0, "settlement opened a connection")
+            XCTAssertTrue(terminal.requests.isEmpty, "settlement sent \(terminal.requests)")
         }
     }
 

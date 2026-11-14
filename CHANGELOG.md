@@ -2,7 +2,16 @@
 
 All notable changes to the TKPay NAPS iOS SDK are documented here.
 
-## Unreleased — Sunmi P2 / Ingenico Lane3600 fixes
+## [1.4.1] - 2026-11-14 — Sunmi P2 / Ingenico Lane3600 fixes
+
+- **change (settlement, spec v2 §4.7):** `settlement` no longer sends TM 010 and no
+  longer reports a télécollecte that never happened. The ECR protocol has no settlement
+  message: TM 010 is Payment Totals, and on a Sunmi P2 it returned the same totals
+  ticket twice with no batch closed. `settlement` now sends nothing, opens no
+  connection and returns `success == false`, `responseCode == "UNSUPPORTED"`. It is
+  deprecated, as are `TLVProtocol.buildSettlementRequest` and
+  `TLVProtocol.MessageTypes.settlementRequest` / `settlementResponse`. Run télécollecte
+  from the terminal menu; use `totals()` for the daily totals ticket.
 
 Ported from the canonical C# SDK and the Node SDK, where these frames were verified live
 on a Sunmi P2 (TCP) and a Lane3600 (USB). This SDK is TCP only, so the USB serial fixes

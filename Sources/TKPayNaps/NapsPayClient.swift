@@ -116,39 +116,27 @@ public class NapsPayClient {
         }
     }
 
-    /// Force end-of-day settlement (telecollecte) — TM=010
+    /// Deprecated: télécollecte is not part of the NapsPay ECR protocol.
     ///
-    /// Sends batch totals to the NAPS server. The terminal must be idle
-    /// ("Attente Caisse") and referencing must have run at least once.
+    /// Spec v2.0 §4.7 defines TM=010 as Payment Totals, not settlement: the terminal
+    /// only returns the daily totals ticket and closes no batch. Run télécollecte from
+    /// the terminal menu. This method sends nothing and opens no connection; it always
+    /// returns `success == false` with `responseCode == "UNSUPPORTED"`. Use `totals()`
+    /// for the daily totals ticket.
     ///
     /// - Parameters:
-    ///   - registerId: Register ID (2 digits, e.g., "01")
-    ///   - cashierId: Cashier ID (5 digits, e.g., "00001")
-    /// - Returns: SettlementResult with response code
+    ///   - registerId: Register ID (2 digits, e.g., "01"), ignored
+    ///   - cashierId: Cashier ID (5 digits, e.g., "00001"), ignored
+    /// - Returns: SettlementResult with `responseCode == "UNSUPPORTED"`
+    @available(*, deprecated, message: "Telecollecte is not part of the NapsPay ECR protocol: run it from the terminal menu. Use totals() for the daily totals ticket.")
     public func settlement(registerId: String, cashierId: String) async -> SettlementResult {
-        let ncai = registerId + cashierId
-        let tlvRequest = TLVProtocol.buildSettlementRequest(ncai: ncai)
-        let connection = NapsConnection(config: config)
-
-        do {
-            try await connection.connect()
-            let response = try await connection.sendAndReceive(tlvRequest, timeout: config.timeout)
-            connection.disconnect()
-
-            let fields = TLVProtocol.parse(response)
-            let responseCode = fields[TLVProtocol.Tags.CR] ?? ""
-
-            return SettlementResult(
-                success: responseCode == "000",
-                responseCode: responseCode,
-                date: fields[TLVProtocol.Tags.DA],
-                time: fields[TLVProtocol.Tags.HE],
-                error: responseCode != "000" ? settlementError(responseCode) : nil
-            )
-        } catch {
-            connection.disconnect()
-            return SettlementResult(success: false, responseCode: "", date: nil, time: nil, error: error.localizedDescription)
-        }
+        return SettlementResult(
+            success: false,
+            responseCode: "UNSUPPORTED",
+            date: nil,
+            time: nil,
+            error: "Telecollecte is not part of the NapsPay ECR protocol: run it from the terminal menu. Use totals() for the daily totals ticket."
+        )
     }
 
     /// Cancel (void) a previous transaction — two-phase flow (TM=003 → TM=004)
@@ -386,14 +374,6 @@ public class NapsPayClient {
         try await connection.connect()
         let response = try await connection.sendAndReceive(tlv, timeout: config.timeout)
         return TLVProtocol.parse(response)
-    }
-
-    private func settlementError(_ responseCode: String) -> String {
-        switch responseCode {
-        case "052": return "Already settled today"
-        case "909": return "Terminal or server is down"
-        default: return "Settlement failed with code: \(responseCode)"
-        }
     }
 
     private func generateSequence() -> String {
